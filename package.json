@@ -7,13 +7,22 @@
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "cd server && npm run dev",
     "client": "cd client && npm run dev",
-    "build": "cd client && npm run build",
-    "start": "cd server && npm start"
+    "build": "cd client && npm install && npm run build",
+    "start": "node server/index.js",
+    "postinstall": "cd client && npm install"
   },
   "keywords": ["p2p", "webrtc", "file-sharing", "mdns", "react"],
   "author": "P2P File Share",
   "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "cors": "^2.8.5",
+    "bonjour-service": "^1.0.10",
+    "uuid": "^9.0.0"
+  },
   "devDependencies": {
-    "concurrently": "^8.2.2"
+    "concurrently": "^8.2.2",
+    "nodemon": "^3.0.1"
   }
 }
