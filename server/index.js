@@ -21,10 +21,8 @@ const NODE_ENV = process.env.NODE_ENV || 'development';
 app.use(cors());
 app.use(express.json());
 
-// Serve static files from client build (for production)
-if (NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/dist')));
-}
+// Serve static files from client build
+app.use(express.static(path.join(__dirname, '../client/dist')));
 
 // Room management
 const rooms = new Map(); // Map roomCode to room data
@@ -70,7 +68,7 @@ io.on('connection', (socket) => {
   clientSockets.set(socket.id, socket);
   
   // Handle room creation (sender)
-  socket.on('create-room', (callback) => {
+  socket.on('create-room', (data, callback) => {
     try {
       const room = createRoom(socket.id, true);
       console.log(`🏠 Room created: ${room.code} by ${socket.id}`);
@@ -78,10 +76,19 @@ io.on('connection', (socket) => {
       socket.roomCode = room.code;
       socket.role = 'sender';
       room.lastActivity = Date.now();
-      callback({ success: true, roomCode: room.code });
+      
+      // Emit room created event
+      socket.emit('room-created', { roomCode: room.code });
+      
+      // Call callback if provided
+      if (typeof callback === 'function') {
+        callback({ success: true, roomCode: room.code });
+      }
     } catch (error) {
       console.error('Error creating room:', error);
-      callback({ success: false, error: 'Failed to create room' });
+      if (typeof callback === 'function') {
+        callback({ success: false, error: 'Failed to create room' });
+      }
     }
   });
   
@@ -90,13 +97,17 @@ io.on('connection', (socket) => {
     try {
       const { roomCode } = data;
       if (!roomCode || !rooms.has(roomCode)) {
-        callback({ success: false, error: 'Room not found' });
+        if (typeof callback === 'function') {
+          callback({ success: false, error: 'Room not found' });
+        }
         return;
       }
       
       const room = rooms.get(roomCode);
       if (room.receiver) {
-        callback({ success: false, error: 'Room is full' });
+        if (typeof callback === 'function') {
+          callback({ success: false, error: 'Room is full' });
+        }
         return;
       }
       
@@ -108,16 +119,23 @@ io.on('connection', (socket) => {
       
       console.log(`🚪 User ${socket.id} joined room ${roomCode}`);
       
+      // Emit room joined event
+      socket.emit('room-joined', { roomCode });
+      
       // Notify sender that receiver joined
       const senderSocket = clientSockets.get(room.sender);
       if (senderSocket) {
         senderSocket.emit('receiver-joined', { roomCode });
       }
       
-      callback({ success: true, roomCode });
+      if (typeof callback === 'function') {
+        callback({ success: true, roomCode });
+      }
     } catch (error) {
       console.error('Error joining room:', error);
-      callback({ success: false, error: 'Failed to join room' });
+      if (typeof callback === 'function') {
+        callback({ success: false, error: 'Failed to join room' });
+      }
     }
   });
   
@@ -147,6 +165,21 @@ io.on('connection', (socket) => {
         return;
       }
       
+      // Validate file size (500MB limit)
+      const maxSize = 500 * 1024 * 1024;
+      if (data.fileSize > maxSize) {
+        console.error('File too large:', data.fileSize, 'bytes');
+        socket.emit('file-transfer-error', { error: 'File too large (max 500MB)' });
+        return;
+      }
+      
+      // Validate file name
+      if (data.fileName.length > 255) {
+        console.error('File name too long:', data.fileName.length);
+        socket.emit('file-transfer-error', { error: 'File name too long' });
+        return;
+      }
+      
       console.log(`📁 File transfer request in room ${socket.roomCode}: ${data.fileName} (${data.fileSize} bytes)`);
       
       // Send to all other clients in the same room
@@ -162,6 +195,7 @@ io.on('connection', (socket) => {
       }
     } catch (error) {
       console.error('Error handling file transfer request:', error);
+      socket.emit('file-transfer-error', { error: 'Server error processing file transfer request' });
     }
   });
   
@@ -255,6 +289,27 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Serve test files
+app.get('/test-file-transfer.html', (req, res) => {
+  res.sendFile(path.join(__dirname, '../test-file-transfer.html'));
+});
+
+app.get('/debug-test.html', (req, res) => {
+  res.sendFile(path.join(__dirname, '../debug-test.html'));
+});
+
+app.get('/simple-file-transfer.html', (req, res) => {
+  res.sendFile(path.join(__dirname, '../simple-file-transfer.html'));
+});
+
+app.get('/working-test.html', (req, res) => {
+  res.sendFile(path.join(__dirname, '../working-test.html'));
+});
+
+app.get('/bare-bones-test.html', (req, res) => {
+  res.sendFile(path.join(__dirname, '../bare-bones-test.html'));
+});
+
 // Serve React app for all other routes (for production)
 app.get('*', (req, res) => {
   const indexPath = path.join(__dirname, '../client/dist/index.html');
@@ -282,9 +337,34 @@ server.listen(PORT, () => {
   console.log(`🏠 Room-based file sharing ready`);
 });
 
+// Error handling
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+  // Don't exit in production, log and continue
+  if (process.env.NODE_ENV !== 'production') {
+    process.exit(1);
+  }
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit in production, log and continue
+  if (process.env.NODE_ENV !== 'production') {
+    process.exit(1);
+  }
+});
+
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n🛑 Shutting down server...');
+  server.close(() => {
+    console.log('✅ Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);

@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Bare Bones File Transfer Test</title>
+</head>
+<body>
+    <h1>Bare Bones File Transfer Test</h1>
+    <input type="file" id="fileInput" onchange="handleFileSelect()">
+    <button onclick="test()">Run Test</button>
+    <button onclick="sendFile()" id="sendBtn" disabled>Send File</button>
+    <div id="output"></div>
+    
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        let socket = null;
+        let peerConnection = null;
+        let dataChannel = null;
+        let isSender = false;
+        let roomCode = null;
+        let selectedFile = null;
+        let senderSocket = null;
+        let receiverSocket = null;
+        
+        function log(msg) {
+            console.log(msg);
+            document.getElementById('output').innerHTML += msg + '<br>';
+        }
+        
+        function handleFileSelect() {
+            const fileInput = document.getElementById('fileInput');
+            selectedFile = fileInput.files[0];
+            if (selectedFile) {
+                log(`File selected: ${selectedFile.name} (${(selectedFile.size / 1024 / 1024).toFixed(2)} MB)`);
+                document.getElementById('sendBtn').disabled = false;
+            }
+        }
+        
+        function test() {
+            log('Starting test...');
+            
+            // Create two connections
+            senderSocket = io('http://localhost:3001');
+            receiverSocket = io('http://localhost:3001');
+            
+            senderSocket.on('connect', () => {
+                log('Sender connected');
+                senderSocket.emit('create-room', { role: 'sender' });
+            });
+            
+            senderSocket.on('room-created', (data) => {
+                log(`Room created: ${data.roomCode}`);
+                roomCode = data.roomCode;
+                
+                // Receiver joins
+                receiverSocket.emit('join-room', { roomCode: data.roomCode, role: 'receiver' });
+            });
+            
+            receiverSocket.on('connect', () => {
+                log('Receiver connected');
+            });
+            
+            receiverSocket.on('room-joined', (data) => {
+                log(`Receiver joined room: ${data.roomCode}`);
+                
+                // Setup WebRTC
+                setupWebRTC(senderSocket, receiverSocket);
+            });
+        }
+        
+        function setupWebRTC(senderSocket, receiverSocket) {
+            log('Setting up WebRTC...');
+            
+            // Sender creates peer connection
+            const senderPC = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+            
+            // Receiver creates peer connection
+            const receiverPC = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+            
+            // Sender creates data channel
+            dataChannel = senderPC.createDataChannel('fileTransfer');
+            dataChannel.onopen = () => {
+                log('Data channel opened!');
+                log('Ready to send files. Select a file and click "Send File"');
+            };
+            
+            // Receiver handles data channel
+            receiverPC.ondatachannel = (event) => {
+                const channel = event.channel;
+                let receivedChunks = [];
+                let fileName = '';
+                let fileSize = 0;
+                let receivedSize = 0;
+                
+                channel.onmessage = (event) => {
+                    const data = event.data;
+                    
+                    if (typeof data === 'string') {
+                        // This is metadata
+                        const metadata = JSON.parse(data);
+                        if (metadata.type === 'file-info') {
+                            fileName = metadata.name;
+                            fileSize = metadata.size;
+                            log(`Receiving file: ${fileName} (${(fileSize / 1024 / 1024).toFixed(2)} MB)`);
+                        }
+                    } else {
+                        // This is file data
+                        receivedChunks.push(data);
+                        receivedSize += data.byteLength;
+                        
+                        const progress = (receivedSize / fileSize * 100).toFixed(1);
+                        log(`Progress: ${progress}% (${(receivedSize / 1024 / 1024).toFixed(2)} MB / ${(fileSize / 1024 / 1024).toFixed(2)} MB)`);
+                        
+                        if (receivedSize >= fileSize) {
+                            // File complete
+                            const fileBlob = new Blob(receivedChunks);
+                            log(`File received successfully: ${fileName}`);
+                            
+                            // Create download link
+                            const url = URL.createObjectURL(fileBlob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = fileName;
+                            a.textContent = `Download ${fileName}`;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                        }
+                    }
+                };
+            };
+            
+            // ICE candidates
+            senderPC.onicecandidate = (event) => {
+                if (event.candidate) {
+                    receiverPC.addIceCandidate(event.candidate);
+                }
+            };
+            
+            receiverPC.onicecandidate = (event) => {
+                if (event.candidate) {
+                    senderPC.addIceCandidate(event.candidate);
+                }
+            };
+            
+            // Create offer/answer
+            senderPC.createOffer().then(offer => {
+                return senderPC.setLocalDescription(offer);
+            }).then(() => {
+                return receiverPC.setRemoteDescription(senderPC.localDescription);
+            }).then(() => {
+                return receiverPC.createAnswer();
+            }).then(answer => {
+                return receiverPC.setLocalDescription(answer);
+            }).then(() => {
+                return senderPC.setRemoteDescription(receiverPC.localDescription);
+            }).then(() => {
+                log('WebRTC connection established');
+            }).catch(err => {
+                log(`Error: ${err}`);
+            });
+        }
+        
+        function sendFile() {
+            if (!selectedFile) {
+                log('No file selected');
+                return;
+            }
+            
+            if (!dataChannel || dataChannel.readyState !== 'open') {
+                log('Data channel not ready');
+                return;
+            }
+            
+            log(`Sending file: ${selectedFile.name} (${(selectedFile.size / 1024 / 1024).toFixed(2)} MB)`);
+            
+            // Send file metadata first
+            const metadata = {
+                type: 'file-info',
+                name: selectedFile.name,
+                size: selectedFile.size
+            };
+            dataChannel.send(JSON.stringify(metadata));
+            
+            // Send file in chunks
+            const chunkSize = 64 * 1024; // 64KB chunks
+            let offset = 0;
+            
+            const sendChunk = () => {
+                if (offset >= selectedFile.size) {
+                    log('File sent successfully!');
+                    return;
+                }
+                
+                const chunk = selectedFile.slice(offset, offset + chunkSize);
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    dataChannel.send(e.target.result);
+                    offset += chunk.size;
+                    
+                    const progress = (offset / selectedFile.size * 100).toFixed(1);
+                    log(`Sending: ${progress}% (${(offset / 1024 / 1024).toFixed(2)} MB / ${(selectedFile.size / 1024 / 1024).toFixed(2)} MB)`);
+                    
+                    // Send next chunk
+                    setTimeout(sendChunk, 0);
+                };
+                
+                reader.readAsArrayBuffer(chunk);
+            };
+            
+            sendChunk();
+        }
+    </script>
+</body>
+</html>

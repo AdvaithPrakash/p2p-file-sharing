@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>File Transfer Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .info { background: #d1ecf1; color: #0c5460; }
+        .logs { background: #f8f9fa; border: 1px solid #dee2e6; padding: 10px; height: 300px; overflow-y: auto; }
+        button { padding: 10px 20px; margin: 5px; cursor: pointer; }
+        input[type="file"] { margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>P2P File Transfer Test</h1>
+    
+    <div id="status" class="status info">Initializing...</div>
+    
+    <div>
+        <h3>Room Management</h3>
+        <button onclick="createRoom()">Create Room (Sender)</button>
+        <button onclick="joinRoom()">Join Room (Receiver)</button>
+        <br>
+        <input type="text" id="roomCode" placeholder="Enter room code to join" style="width: 200px; padding: 5px;">
+    </div>
+    
+    <div>
+        <h3>File Transfer</h3>
+        <input type="file" id="fileInput" onchange="handleFileSelect()">
+        <button onclick="sendFile()" id="sendBtn" disabled>Send File</button>
+        <button onclick="downloadFile()" id="downloadBtn" disabled>Download File</button>
+    </div>
+    
+    <div>
+        <h3>Connection Status</h3>
+        <div id="connectionStatus">Disconnected</div>
+    </div>
+    
+    <div>
+        <h3>Transfer Progress</h3>
+        <div id="progress">0%</div>
+        <div id="speed">Speed: 0 MB/s</div>
+    </div>
+    
+    <div>
+        <h3>Debug Logs</h3>
+        <div id="logs" class="logs"></div>
+        <button onclick="clearLogs()">Clear Logs</button>
+    </div>
+    
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        let socket = null;
+        let peerConnection = null;
+        let dataChannel = null;
+        let selectedFile = null;
+        let receivedChunks = [];
+        let fileInfo = null;
+        let isSender = false;
+        
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const logDiv = document.getElementById('logs');
+            const color = type === 'error' ? '#721c24' : type === 'success' ? '#155724' : '#0c5460';
+            logDiv.innerHTML += `<div style="color: ${color}">[${timestamp}] ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+        
+        function updateStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+        
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+        }
+        
+        function initSocket() {
+            socket = io('http://localhost:3001');
+            
+            socket.on('connect', () => {
+                log('Connected to server', 'success');
+                updateStatus('Connected to server', 'success');
+            });
+            
+            socket.on('disconnect', () => {
+                log('Disconnected from server', 'error');
+                updateStatus('Disconnected from server', 'error');
+            });
+            
+            socket.on('room-created', (data) => {
+                log(`Room created: ${data.roomCode}`, 'success');
+                updateStatus(`Room created: ${data.roomCode}`, 'success');
+                document.getElementById('roomCode').value = data.roomCode;
+            });
+            
+            socket.on('receiver-joined', (data) => {
+                log(`Receiver joined room: ${data.roomCode}`, 'success');
+                // Trigger WebRTC connection for sender when receiver joins
+                if (isSender && peerConnection) {
+                    log('Receiver joined, initiating WebRTC connection...');
+                    // Connection should already be initiated, but ensure data channel is ready
+                }
+            });
+            
+            socket.on('room-joined', (data) => {
+                log(`Joined room: ${data.roomCode}`, 'success');
+                updateStatus(`Joined room: ${data.roomCode}`, 'success');
+                initWebRTC();
+            });
+            
+            socket.on('webrtc-signal', async (data) => {
+                log(`WebRTC signal received: ${data.type}`);
+                await handleWebRTCSignal(data);
+            });
+            
+            socket.on('file-transfer-request', (data) => {
+                log(`File transfer request: ${data.fileName} (${(data.fileSize / 1024 / 1024).toFixed(2)} MB)`);
+                if (confirm(`Accept file transfer: ${data.fileName}?`)) {
+                    socket.emit('file-transfer-response', { accepted: true });
+                    fileInfo = data;
+                } else {
+                    socket.emit('file-transfer-response', { accepted: false });
+                }
+            });
+        }
+        
+        function initWebRTC() {
+            const config = {
+                iceServers: [
+                    { urls: 'stun:stun.l.google.com:19302' },
+                    { urls: 'stun:stun1.l.google.com:19302' }
+                ]
+            };
+            
+            peerConnection = new RTCPeerConnection(config);
+            
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.emit('webrtc-signal', {
+                        type: 'ice-candidate',
+                        candidate: event.candidate
+                    });
+                }
+            };
+            
+            peerConnection.ondatachannel = (event) => {
+                log('Data channel received');
+                dataChannel = event.channel;
+                setupDataChannel(dataChannel);
+            };
+            
+            peerConnection.onconnectionstatechange = () => {
+                const state = peerConnection.connectionState;
+                log(`WebRTC connection state: ${state}`);
+                document.getElementById('connectionStatus').textContent = state;
+                
+                if (state === 'connected') {
+                    log('WebRTC connection established!', 'success');
+                } else if (state === 'failed') {
+                    log('WebRTC connection failed', 'error');
+                }
+            };
+            
+            peerConnection.oniceconnectionstatechange = () => {
+                const iceState = peerConnection.iceConnectionState;
+                log(`ICE connection state: ${iceState}`);
+                
+                if (iceState === 'connected' || iceState === 'completed') {
+                    log('ICE connection established!', 'success');
+                } else if (iceState === 'failed') {
+                    log('ICE connection failed', 'error');
+                }
+            };
+            
+            // Create data channel for sender
+            if (isSender) {
+                log('Creating data channel as sender...');
+                dataChannel = peerConnection.createDataChannel('fileTransfer');
+                setupDataChannel(dataChannel);
+                
+                // Create offer and send it
+                peerConnection.createOffer().then(offer => {
+                    return peerConnection.setLocalDescription(offer);
+                }).then(() => {
+                    socket.emit('webrtc-signal', {
+                        type: 'offer',
+                        signal: peerConnection.localDescription
+                    });
+                    log('Offer sent');
+                }).catch(error => {
+                    log(`Error creating offer: ${error}`, 'error');
+                });
+            }
+        }
+        
+        function setupDataChannel(channel) {
+            log(`Setting up data channel, state: ${channel.readyState}`);
+            
+            channel.onopen = () => {
+                log('Data channel opened', 'success');
+                document.getElementById('connectionStatus').textContent = 'Connected';
+            };
+            
+            channel.onclose = () => {
+                log('Data channel closed', 'error');
+                document.getElementById('connectionStatus').textContent = 'Disconnected';
+            };
+            
+            channel.onerror = (error) => {
+                log(`Data channel error: ${error}`, 'error');
+                document.getElementById('connectionStatus').textContent = 'Error';
+            };
+            
+            channel.onmessage = (event) => {
+                if (event.data instanceof ArrayBuffer) {
+                    log(`Received chunk: ${event.data.byteLength} bytes`);
+                    receivedChunks.push(new Uint8Array(event.data));
+                    updateProgress();
+                } else {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'file-info') {
+                        log(`File info: ${data.fileName} (${data.totalChunks} chunks)`);
+                        fileInfo = data;
+                        receivedChunks = [];
+                    }
+                }
+            };
+        }
+        
+        function updateProgress() {
+            if (fileInfo && receivedChunks.length > 0) {
+                const progress = (receivedChunks.length / fileInfo.totalChunks) * 100;
+                document.getElementById('progress').textContent = `${progress.toFixed(1)}%`;
+                
+                if (receivedChunks.length === fileInfo.totalChunks) {
+                    log('All chunks received, reconstructing file...', 'success');
+                    reconstructFile();
+                }
+            }
+        }
+        
+        function reconstructFile() {
+            const totalSize = receivedChunks.reduce((acc, chunk) => acc + chunk.length, 0);
+            const fileData = new Uint8Array(totalSize);
+            
+            let offset = 0;
+            for (const chunk of receivedChunks) {
+                fileData.set(chunk, offset);
+                offset += chunk.length;
+            }
+            
+            const blob = new Blob([fileData], { type: fileInfo.fileType || 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileInfo.fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            log(`File downloaded: ${fileInfo.fileName}`, 'success');
+            document.getElementById('downloadBtn').disabled = false;
+        }
+        
+        async function handleWebRTCSignal(data) {
+            if (data.type === 'offer') {
+                await peerConnection.setRemoteDescription(data.signal);
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                
+                socket.emit('webrtc-signal', {
+                    type: 'answer',
+                    signal: answer
+                });
+            } else if (data.type === 'answer') {
+                await peerConnection.setRemoteDescription(data.signal);
+            } else if (data.type === 'ice-candidate') {
+                await peerConnection.addIceCandidate(data.candidate);
+            }
+        }
+        
+        function createRoom() {
+            isSender = true;
+            socket.emit('create-room', { role: 'sender' });
+            // Initialize WebRTC for sender
+            initWebRTC();
+        }
+        
+        function joinRoom() {
+            const roomCode = document.getElementById('roomCode').value;
+            if (roomCode) {
+                isSender = false;
+                socket.emit('join-room', { roomCode, role: 'receiver' });
+            }
+        }
+        
+        function handleFileSelect() {
+            selectedFile = document.getElementById('fileInput').files[0];
+            if (selectedFile) {
+                log(`File selected: ${selectedFile.name} (${(selectedFile.size / 1024 / 1024).toFixed(2)} MB)`);
+                document.getElementById('sendBtn').disabled = false;
+            }
+        }
+        
+        async function sendFile() {
+            if (!selectedFile) {
+                log('Cannot send file: no file selected', 'error');
+                return;
+            }
+            
+            if (!dataChannel) {
+                log('Cannot send file: data channel not created', 'error');
+                return;
+            }
+            
+            if (dataChannel.readyState !== 'open') {
+                log(`Cannot send file: data channel not ready (state: ${dataChannel.readyState})`, 'error');
+                log('Please wait for the connection to be established...', 'info');
+                return;
+            }
+            
+            log(`Starting file transfer: ${selectedFile.name}`);
+            
+            // Send file info
+            const chunkSize = 64 * 1024; // 64KB chunks
+            const totalChunks = Math.ceil(selectedFile.size / chunkSize);
+            
+            dataChannel.send(JSON.stringify({
+                type: 'file-info',
+                fileName: selectedFile.name,
+                fileSize: selectedFile.size,
+                fileType: selectedFile.type,
+                totalChunks: totalChunks
+            }));
+            
+            // Send chunks
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * chunkSize;
+                const end = Math.min(start + chunkSize, selectedFile.size);
+                const chunk = selectedFile.slice(start, end);
+                
+                const arrayBuffer = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onload = (e) => resolve(e.target.result);
+                    reader.readAsArrayBuffer(chunk);
+                });
+                
+                dataChannel.send(arrayBuffer);
+                log(`Sent chunk ${i + 1}/${totalChunks}`);
+            }
+            
+            log('File transfer completed', 'success');
+        }
+        
+        function downloadFile() {
+            if (receivedChunks.length > 0 && fileInfo) {
+                reconstructFile();
+            }
+        }
+        
+        // Initialize
+        initSocket();
+    </script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebRTC Debug Test</title>
+</head>
+<body>
+    <h1>WebRTC File Transfer Debug Test</h1>
+    <div id="status">Initializing...</div>
+    <div id="logs"></div>
+    
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io('http://localhost:3001');
+        const statusDiv = document.getElementById('status');
+        const logsDiv = document.getElementById('logs');
+        
+        function log(message) {
+            console.log(message);
+            logsDiv.innerHTML += '<div>' + new Date().toLocaleTimeString() + ': ' + message + '</div>';
+        }
+        
+        socket.on('connect', () => {
+            log('Connected to server');
+            statusDiv.textContent = 'Connected to server';
+        });
+        
+        socket.on('disconnect', () => {
+            log('Disconnected from server');
+            statusDiv.textContent = 'Disconnected';
+        });
+        
+        socket.on('room-joined', (data) => {
+            log('Room joined: ' + JSON.stringify(data));
+            statusDiv.textContent = 'Room joined: ' + data.roomCode;
+        });
+        
+        socket.on('webrtc-signal', (data) => {
+            log('WebRTC signal received: ' + data.type);
+        });
+        
+        socket.on('file-transfer-request', (data) => {
+            log('File transfer request: ' + JSON.stringify(data));
+        });
+        
+        // Test room creation
+        function createRoom() {
+            socket.emit('create-room');
+        }
+        
+        // Test room joining
+        function joinRoom() {
+            const roomCode = prompt('Enter room code:');
+            if (roomCode) {
+                socket.emit('join-room', { roomCode, role: 'receiver' });
+            }
+        }
+        
+        // Add buttons
+        document.body.innerHTML += '<br><button onclick="createRoom()">Create Room</button>';
+        document.body.innerHTML += '<button onclick="joinRoom()">Join Room</button>';
+    </script>
+</body>
+</html>

@@ -40,6 +40,10 @@ function App() {
   const receivedChunksRef = useRef([])
   const transferStartTimeRef = useRef(null)
   const roomCodeRef = useRef(null)
+  const transferIntervalRef = useRef(null)
+  const connectionTimeoutRef = useRef(null)
+  const retryCountRef = useRef(0)
+  const maxRetries = 3
 
   useEffect(() => {
     // Set loaded state after a short delay to ensure CSS is loaded
@@ -64,6 +68,11 @@ function App() {
     newSocket.on('receiver-joined', (data) => {
       console.log('Receiver joined room:', data.roomCode)
       setConnectionStatus('p2p-connected')
+      // Trigger WebRTC connection initiation for sender
+      if (role === 'sender') {
+        console.log('Receiver joined, initiating WebRTC connection...')
+        initiateConnection()
+      }
     })
 
     newSocket.on('sender-left', () => {
@@ -83,37 +92,42 @@ function App() {
     newSocket.on('webrtc-signal', handleWebRTCSignal)
     newSocket.on('file-transfer-request', handleFileTransferRequest)
     newSocket.on('file-transfer-response', handleFileTransferResponse)
+    newSocket.on('file-transfer-error', handleFileTransferError)
 
     return () => {
       clearTimeout(timer)
       newSocket.close()
       // Cleanup WebRTC connections
-      if (dataChannelRef.current) {
-        dataChannelRef.current.close()
+      cleanupWebRTCConnections()
+      // Clear all intervals and timeouts
+      if (transferIntervalRef.current) {
+        clearInterval(transferIntervalRef.current)
+        transferIntervalRef.current = null
       }
-      if (peerConnectionRef.current) {
-        peerConnectionRef.current.close()
+      if (connectionTimeoutRef.current) {
+        clearTimeout(connectionTimeoutRef.current)
+        connectionTimeoutRef.current = null
       }
     }
   }, []) // Remove selectedPeer dependency to prevent infinite re-renders
 
   const handleWebRTCSignal = async (data) => {
-    console.log('WebRTC signal received:', data.type, 'from:', data.from, 'roomCode:', roomCodeRef.current)
+    console.log('📡 WebRTC signal received:', data.type, 'from:', data.from, 'roomCode:', roomCodeRef.current)
     const { type, signal, from } = data
     
     // Validate data
     if (!data || !type || !signal || !from) {
-      console.error('Invalid WebRTC signal data:', data)
+      console.error('❌ Invalid WebRTC signal data:', data)
       return
     }
     
     // Only process signals if we're in a room
     if (!roomCodeRef.current) {
-      console.log('No room code, ignoring signal. Current roomCode:', roomCodeRef.current)
+      console.log('⚠️ No room code, ignoring signal. Current roomCode:', roomCodeRef.current)
       return
     }
     
-    console.log('Processing WebRTC signal in room:', roomCodeRef.current)
+    console.log('🔄 Processing WebRTC signal in room:', roomCodeRef.current)
     
     if (!peerConnectionRef.current) {
       console.log('No peer connection, initializing...')
@@ -122,25 +136,32 @@ function App() {
 
     try {
       if (type === 'offer') {
-        console.log('Processing offer...')
+        console.log('📥 Processing offer...')
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal))
         const answer = await peerConnectionRef.current.createAnswer()
         await peerConnectionRef.current.setLocalDescription(answer)
         
-        console.log('Sending answer...')
+        console.log('📤 Sending answer...')
         socket.emit('webrtc-signal', {
           type: 'answer',
           signal: answer
         })
+        console.log('✅ Answer sent successfully')
       } else if (type === 'answer') {
-        console.log('Processing answer...')
+        console.log('📥 Processing answer...')
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal))
+        console.log('✅ Answer processed successfully')
       } else if (type === 'ice-candidate') {
-        console.log('Processing ICE candidate...')
+        console.log('🧊 Processing ICE candidate...', signal.candidate)
         await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(signal))
+        console.log('✅ ICE candidate added successfully')
+      } else {
+        console.warn('⚠️ Unknown signal type:', type)
       }
     } catch (error) {
-      console.error('Error handling WebRTC signal:', error)
+      console.error('❌ Error handling WebRTC signal:', error)
+      console.error('Signal type:', type)
+      console.error('Signal data:', signal)
       setTransferState('error')
     }
   }
@@ -176,6 +197,12 @@ function App() {
     }
   }
 
+  const handleFileTransferError = (data) => {
+    console.error('File transfer error:', data.error)
+    setTransferState('error')
+    alert(`File transfer error: ${data.error}`)
+  }
+
   // Handle file transfer confirmation modal actions
   const handleAcceptTransfer = () => {
     if (pendingTransfer) {
@@ -208,24 +235,49 @@ function App() {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' }
-      ],
-      iceCandidatePoolSize: 10, // Pre-gather more ICE candidates
-      bundlePolicy: 'max-bundle', // Reduce number of ICE candidates
-      rtcpMuxPolicy: 'require', // Reduce number of ICE candidates
-      iceTransportPolicy: 'all' // Allow both STUN and TURN
+        // Add TURN servers for better connectivity in restrictive networks
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ]
     }
 
     peerConnectionRef.current = new RTCPeerConnection(configuration)
 
     peerConnectionRef.current.onicecandidate = (event) => {
       if (event.candidate && roomCodeRef.current) {
+        console.log('ICE candidate generated:', event.candidate.type, event.candidate.protocol)
         socket.emit('webrtc-signal', {
           type: 'ice-candidate',
           signal: event.candidate
         })
+      } else if (event.candidate) {
+        console.log('ICE candidate generated but no room code available')
+      } else {
+        console.log('ICE gathering completed')
       }
+    }
+
+    // Add ICE candidate error handling
+    peerConnectionRef.current.onicecandidateerror = (event) => {
+      console.error('ICE candidate error:', event)
+      console.error('Error details:', {
+        errorCode: event.errorCode,
+        errorText: event.errorText,
+        url: event.url
+      })
+    }
+
+    // Add ICE gathering state change logging
+    peerConnectionRef.current.onicegatheringstatechange = () => {
+      console.log('ICE gathering state changed to:', peerConnectionRef.current.iceGatheringState)
     }
 
     peerConnectionRef.current.ondatachannel = (event) => {
@@ -236,21 +288,71 @@ function App() {
     }
 
     peerConnectionRef.current.onconnectionstatechange = () => {
-      console.log('Connection state:', peerConnectionRef.current.connectionState)
-      if (peerConnectionRef.current.connectionState === 'connected') {
+      const state = peerConnectionRef.current.connectionState
+      console.log('WebRTC connection state changed to:', state)
+      
+      if (state === 'connected') {
+        console.log('✅ WebRTC connection established successfully')
         setConnectionStatus('p2p-connected')
-      } else if (peerConnectionRef.current.connectionState === 'failed' || 
-                 peerConnectionRef.current.connectionState === 'disconnected') {
+      } else if (state === 'connecting') {
+        console.log('🔄 WebRTC connection in progress...')
+      } else if (state === 'failed') {
+        console.error('❌ WebRTC connection failed - this often indicates network/firewall issues')
+        console.error('Possible causes:')
+        console.error('- Firewall blocking WebRTC traffic')
+        console.error('- NAT traversal issues (try TURN servers)')
+        console.error('- Network restrictions')
+        
+        // Retry logic
+        if (retryCountRef.current < maxRetries) {
+          retryCountRef.current++
+          console.log(`🔄 Retrying connection (attempt ${retryCountRef.current}/${maxRetries})...`)
+          
+          setTimeout(() => {
+            if (roomCode && role) {
+              console.log('🔄 Attempting to reconnect...')
+              initiateConnection()
+            }
+          }, 2000 * retryCountRef.current) // Exponential backoff
+        } else {
+          console.error('❌ Max retries reached, giving up')
+          setConnectionStatus('connected')
+          setTransferState('error')
+          alert('Connection failed after multiple attempts. Please check your network and try again.')
+        }
+      } else if (state === 'disconnected') {
+        console.log('⚠️ WebRTC connection disconnected')
         setConnectionStatus('connected')
         setTransferState('error')
+      } else if (state === 'closed') {
+        console.log('🔒 WebRTC connection closed')
+        setConnectionStatus('connected')
       }
     }
 
     peerConnectionRef.current.oniceconnectionstatechange = () => {
-      console.log('ICE connection state:', peerConnectionRef.current.iceConnectionState)
-      if (peerConnectionRef.current.iceConnectionState === 'failed') {
+      const iceState = peerConnectionRef.current.iceConnectionState
+      console.log('ICE connection state changed to:', iceState)
+      
+      if (iceState === 'connected' || iceState === 'completed') {
+        console.log('✅ ICE connection established')
+      } else if (iceState === 'checking') {
+        console.log('🔄 ICE connection checking...')
+      } else if (iceState === 'failed') {
+        console.error('❌ ICE connection failed - NAT traversal unsuccessful')
+        console.error('This usually means:')
+        console.error('- STUN servers are not accessible')
+        console.error('- TURN servers are needed but not working')
+        console.error('- Network firewall is blocking WebRTC')
         setConnectionStatus('connected')
         setTransferState('error')
+      } else if (iceState === 'disconnected') {
+        console.log('⚠️ ICE connection disconnected')
+        setConnectionStatus('connected')
+        setTransferState('error')
+      } else if (iceState === 'closed') {
+        console.log('🔒 ICE connection closed')
+        setConnectionStatus('connected')
       }
     }
   }
@@ -259,8 +361,18 @@ function App() {
     console.log('Setting up data channel, current state:', channel.readyState)
     
     channel.onopen = () => {
-      console.log('Data channel opened')
+      console.log('✅ Data channel opened successfully')
       setConnectionStatus('p2p-connected')
+    }
+    
+    channel.onclose = () => {
+      console.log('❌ Data channel closed')
+      setConnectionStatus('connected')
+    }
+    
+    channel.onerror = (error) => {
+      console.error('❌ Data channel error:', error)
+      setConnectionStatus('connected')
     }
 
     channel.onmessage = (event) => {
@@ -389,14 +501,101 @@ function App() {
     setRole(newRole)
   }
 
+  // Comprehensive cleanup function
+  const cleanupWebRTCConnections = () => {
+    console.log('🧹 Cleaning up WebRTC connections...')
+    
+    // Clear intervals and timeouts
+    if (transferIntervalRef.current) {
+      clearInterval(transferIntervalRef.current)
+      transferIntervalRef.current = null
+    }
+    if (connectionTimeoutRef.current) {
+      clearTimeout(connectionTimeoutRef.current)
+      connectionTimeoutRef.current = null
+    }
+    
+    // Close data channel
+    if (dataChannelRef.current) {
+      try {
+        dataChannelRef.current.close()
+      } catch (error) {
+        console.warn('Error closing data channel:', error)
+      }
+      dataChannelRef.current = null
+    }
+    
+    // Close peer connection
+    if (peerConnectionRef.current) {
+      try {
+        peerConnectionRef.current.close()
+      } catch (error) {
+        console.warn('Error closing peer connection:', error)
+      }
+      peerConnectionRef.current = null
+    }
+    
+    // Clear chunk data
+    receivedChunksRef.current = []
+    fileChunksRef.current = []
+    
+    // Reset retry count
+    retryCountRef.current = 0
+  }
+
+  // File validation function
+  const validateFile = (file) => {
+    const maxSize = 500 * 1024 * 1024 // 500MB limit
+    const allowedTypes = [
+      'image/', 'video/', 'audio/', 'text/', 'application/',
+      'application/pdf', 'application/zip', 'application/x-rar-compressed'
+    ]
+    
+    if (!file) {
+      return { valid: false, error: 'No file selected' }
+    }
+    
+    if (file.size > maxSize) {
+      return { valid: false, error: 'File too large (max 500MB)' }
+    }
+    
+    if (file.size === 0) {
+      return { valid: false, error: 'File is empty' }
+    }
+    
+    const isValidType = allowedTypes.some(type => file.type.startsWith(type)) || 
+                       file.name.includes('.') // Allow files with extensions
+    
+    if (!isValidType) {
+      return { valid: false, error: 'File type not supported' }
+    }
+    
+    return { valid: true }
+  }
+
+  // Add connection diagnostics
+  const logConnectionDiagnostics = () => {
+    if (peerConnectionRef.current) {
+      console.log('🔍 Connection Diagnostics:')
+      console.log('- Connection State:', peerConnectionRef.current.connectionState)
+      console.log('- ICE Connection State:', peerConnectionRef.current.connectionState)
+      console.log('- ICE Gathering State:', peerConnectionRef.current.iceGatheringState)
+      console.log('- Signaling State:', peerConnectionRef.current.signalingState)
+      console.log('- Data Channel State:', dataChannelRef.current?.readyState || 'No data channel')
+    }
+  }
+
   const initiateConnection = async () => {
     try {
+      console.log('🚀 Initiating WebRTC connection...')
+      
       // Reset transfer state
       setTransferState('idle')
       setTransferProgress(0)
       
       // Clean up existing connection
       if (peerConnectionRef.current) {
+        console.log('🧹 Cleaning up existing connection...')
         peerConnectionRef.current.close()
       }
       if (dataChannelRef.current) {
@@ -409,11 +608,18 @@ function App() {
       
       await initializePeerConnection()
       
+      // Log initial diagnostics
+      setTimeout(() => {
+        logConnectionDiagnostics()
+      }, 1000)
+      
       if (role === 'sender') {
-        console.log('Creating data channel as sender...')
-        const dataChannel = peerConnectionRef.current.createDataChannel('fileTransfer')
+        console.log('Creating ultra-optimized data channel as sender...')
+        const dataChannel = peerConnectionRef.current.createDataChannel('fileTransfer', {
+          ordered: true // Ensure order for file reconstruction
+        })
         dataChannelRef.current = dataChannel
-        console.log('Data channel created, state:', dataChannel.readyState)
+        console.log('Ultra-optimized data channel created, state:', dataChannel.readyState)
         setupDataChannel(dataChannel)
 
         const offer = await peerConnectionRef.current.createOffer()
@@ -437,42 +643,76 @@ function App() {
       return
     }
 
+    // Validate file before transfer
+    const validation = validateFile(selectedFile)
+    if (!validation.valid) {
+      console.error('File validation failed:', validation.error)
+      alert(`File validation failed: ${validation.error}`)
+      setTransferState('error')
+      return
+    }
+
+    console.log('🚀 Starting ULTRA-FAST file transfer...')
+    console.log(`📁 File: ${selectedFile.name} (${(selectedFile.size / 1024 / 1024).toFixed(2)} MB)`)
+
     // Check if data channel is open
+    if (!dataChannelRef.current) {
+      console.error('No data channel available')
+      setTransferState('error')
+      alert('No data channel available. Please check your connection.')
+      return
+    }
+    
     if (dataChannelRef.current.readyState !== 'open') {
-      console.log('Data channel not ready, waiting...', dataChannelRef.current.readyState)
-      // Wait for data channel to open
-      dataChannelRef.current.onopen = () => {
-        console.log('Data channel opened, starting transfer...')
-        startFileTransfer()
-      }
+      console.log('Data channel not ready, current state:', dataChannelRef.current.readyState)
+      setTransferState('error')
+      alert('Data channel not ready. Please ensure both users are connected.')
       return
     }
 
     try {
       const file = selectedFile
       
-      // Adaptive chunk sizing based on file size
+      // Ultra-optimized chunk sizing for maximum speed
       let chunkSize, maxConcurrentChunks
-      if (file.size < 10 * 1024 * 1024) { // < 10MB
-        chunkSize = 32 * 1024 // 32KB chunks
-        maxConcurrentChunks = 2
-      } else if (file.size < 100 * 1024 * 1024) { // < 100MB
-        chunkSize = 64 * 1024 // 64KB chunks
-        maxConcurrentChunks = 4
-      } else { // >= 100MB
+      if (file.size < 1 * 1024 * 1024) { // < 1MB
         chunkSize = 128 * 1024 // 128KB chunks
-        maxConcurrentChunks = 6
+        maxConcurrentChunks = 8
+      } else if (file.size < 10 * 1024 * 1024) { // < 10MB
+        chunkSize = 256 * 1024 // 256KB chunks
+        maxConcurrentChunks = 12
+      } else if (file.size < 100 * 1024 * 1024) { // < 100MB
+        chunkSize = 512 * 1024 // 512KB chunks
+        maxConcurrentChunks = 16
+      } else if (file.size < 500 * 1024 * 1024) { // < 500MB
+        chunkSize = 1024 * 1024 // 1MB chunks
+        maxConcurrentChunks = 20
+      } else { // >= 500MB
+        chunkSize = 2048 * 1024 // 2MB chunks
+        maxConcurrentChunks = 25
       }
       
       const totalChunks = Math.ceil(file.size / chunkSize)
       
-      // Compress file if it's text-based and larger than 1MB
-      const shouldCompress = file.size > 1024 * 1024 && (
+      // Ultra-aggressive compression for maximum speed
+      const shouldCompress = file.size > 100 * 1024 && ( // Lower threshold for compression
         file.type.startsWith('text/') || 
         file.name.endsWith('.json') || 
         file.name.endsWith('.xml') || 
         file.name.endsWith('.csv') ||
-        file.name.endsWith('.txt')
+        file.name.endsWith('.txt') ||
+        file.name.endsWith('.md') ||
+        file.name.endsWith('.js') ||
+        file.name.endsWith('.jsx') ||
+        file.name.endsWith('.ts') ||
+        file.name.endsWith('.tsx') ||
+        file.name.endsWith('.css') ||
+        file.name.endsWith('.html') ||
+        file.name.endsWith('.svg') ||
+        file.name.endsWith('.log') ||
+        file.name.endsWith('.sql') ||
+        file.name.endsWith('.yaml') ||
+        file.name.endsWith('.yml')
       )
       
       // Send file info first
@@ -485,11 +725,14 @@ function App() {
         compressed: shouldCompress
       }))
 
-      // Parallel chunk processing
+      // Parallel chunk processing with dynamic adjustment
       let completedChunks = 0
       let sentChunks = 0
       const transferStartTime = Date.now()
       const chunkQueue = []
+      let lastSpeedCheck = Date.now()
+      let currentSpeed = 0
+      let adaptiveConcurrency = maxConcurrentChunks
       
       // Initialize chunk queue
       for (let i = 0; i < totalChunks; i++) {
@@ -515,13 +758,15 @@ function App() {
             reader.readAsArrayBuffer(chunk)
           })
           
-          // Compress chunk if needed
+          // Compress chunk if needed with optimal algorithm
           let dataToSend = arrayBuffer
           if (shouldCompress) {
             try {
-              const compressed = await compressData(arrayBuffer)
+              const algorithm = getOptimalCompression(file.name, file.type)
+              const compressed = await compressData(arrayBuffer, algorithm)
               if (compressed.length < arrayBuffer.byteLength) {
                 dataToSend = compressed
+                console.log(`📦 Compressed chunk ${chunkInfo.index} with ${algorithm}: ${arrayBuffer.byteLength} → ${compressed.length} bytes`)
               }
             } catch (error) {
               console.warn('Compression failed, sending uncompressed:', error)
@@ -539,11 +784,30 @@ function App() {
           const progress = (completedChunks / totalChunks) * 100
           setTransferProgress(progress)
           
-          // Calculate and update transfer speed
-          const elapsed = (Date.now() - transferStartTime) / 1000
+          // Calculate and update transfer speed with dynamic adjustment
+          const now = Date.now()
+          const elapsed = (now - transferStartTime) / 1000
           const transferred = (completedChunks * chunkSize) / (1024 * 1024) // MB
           const speed = transferred / elapsed
+          currentSpeed = speed
           setTransferSpeed(speed)
+          
+          // Aggressive speed optimization - check every 500ms
+          if (now - lastSpeedCheck > 500) {
+            if (speed > 50) { // Ultra high speed - maximize concurrency
+              adaptiveConcurrency = Math.min(maxConcurrentChunks + 5, 30)
+            } else if (speed > 20) { // High speed - increase concurrency
+              adaptiveConcurrency = Math.min(maxConcurrentChunks + 3, 25)
+            } else if (speed > 5) { // Medium speed - maintain concurrency
+              adaptiveConcurrency = maxConcurrentChunks
+            } else if (speed < 1) { // Low speed - decrease concurrency
+              adaptiveConcurrency = Math.max(4, maxConcurrentChunks - 2)
+            } else {
+              adaptiveConcurrency = maxConcurrentChunks
+            }
+            lastSpeedCheck = now
+            console.log(`🚀 Ultra-optimized concurrency: ${adaptiveConcurrency} (speed: ${speed.toFixed(2)} MB/s)`)
+          }
           
           // Update transfer stats
           setTransferStats(prev => {
@@ -574,11 +838,11 @@ function App() {
         }
       }
       
-      // Process chunks with concurrency limit
+      // Process chunks with adaptive concurrency limit
       const processNextChunks = () => {
         const pendingChunks = chunkQueue.filter(chunk => chunk.status === 'pending')
         const processingChunks = chunkQueue.filter(chunk => chunk.status === 'processing')
-        const availableSlots = maxConcurrentChunks - processingChunks.length
+        const availableSlots = adaptiveConcurrency - processingChunks.length
         
         for (let i = 0; i < Math.min(availableSlots, pendingChunks.length); i++) {
           processChunk(pendingChunks[i])
@@ -588,13 +852,20 @@ function App() {
       // Start processing
       processNextChunks()
       
-      // Continue processing as chunks complete
-      const interval = setInterval(() => {
+      // Ultra-fast processing with minimal intervals
+      if (transferIntervalRef.current) {
+        clearInterval(transferIntervalRef.current)
+      }
+      
+      transferIntervalRef.current = setInterval(() => {
         processNextChunks()
         if (completedChunks === totalChunks) {
-          clearInterval(interval)
+          if (transferIntervalRef.current) {
+            clearInterval(transferIntervalRef.current)
+            transferIntervalRef.current = null
+          }
         }
-      }, 10) // Check every 10ms
+      }, 1) // Check every 1ms for maximum responsiveness
       
     } catch (error) {
       console.error('Error starting file transfer:', error)
@@ -666,37 +937,53 @@ function App() {
     }
   }
 
-  // Compression function using Web Compression API
-  const compressData = async (data) => {
-    const stream = new CompressionStream('gzip')
-    const writer = stream.writable.getWriter()
-    const reader = stream.readable.getReader()
-    
-    // Write data to compression stream
-    writer.write(data)
-    writer.close()
-    
-    // Read compressed data
-    const chunks = []
-    let done = false
-    while (!done) {
-      const { value, done: readerDone } = await reader.read()
-      done = readerDone
-      if (value) {
-        chunks.push(value)
+  // Enhanced compression function with multiple algorithms
+  const compressData = async (data, algorithm = 'gzip') => {
+    try {
+      const stream = new CompressionStream(algorithm)
+      const writer = stream.writable.getWriter()
+      const reader = stream.readable.getReader()
+      
+      // Write data to compression stream
+      await writer.write(data)
+      await writer.close()
+      
+      // Read compressed data
+      const chunks = []
+      let done = false
+      while (!done) {
+        const { value, done: readerDone } = await reader.read()
+        done = readerDone
+        if (value) {
+          chunks.push(value)
+        }
       }
+      
+      // Combine chunks
+      const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0)
+      const result = new Uint8Array(totalLength)
+      let offset = 0
+      for (const chunk of chunks) {
+        result.set(chunk, offset)
+        offset += chunk.length
+      }
+      
+      return result.buffer
+    } catch (error) {
+      console.warn(`Compression with ${algorithm} failed:`, error)
+      return data // Return original data if compression fails
     }
-    
-    // Combine chunks
-    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0)
-    const result = new Uint8Array(totalLength)
-    let offset = 0
-    for (const chunk of chunks) {
-      result.set(chunk, offset)
-      offset += chunk.length
+  }
+
+  // Smart compression selection based on file type
+  const getOptimalCompression = (fileName, fileType) => {
+    if (fileType.startsWith('text/') || fileName.endsWith('.json') || fileName.endsWith('.xml')) {
+      return 'gzip' // Best for text
+    } else if (fileName.endsWith('.svg') || fileName.endsWith('.html')) {
+      return 'deflate' // Good for markup
+    } else {
+      return 'gzip' // Default
     }
-    
-    return result.buffer
   }
 
   // Decompression function
@@ -741,27 +1028,21 @@ function App() {
   }
 
   const resetTransfer = () => {
+    console.log('🔄 Resetting transfer...')
     setTransferState('idle')
     setTransferProgress(0)
     setConnectionStatus('connected')
     setSelectedFile(null)
-    receivedChunksRef.current = []
-    fileChunksRef.current = []
     
-    if (dataChannelRef.current) {
-      dataChannelRef.current.close()
-    }
-    if (peerConnectionRef.current) {
-      peerConnectionRef.current.close()
-    }
-    dataChannelRef.current = null
-    peerConnectionRef.current = null
+    // Use comprehensive cleanup
+    cleanupWebRTCConnections()
   }
 
-  // Initiate connection when receiver joins
+  // Initiate connection when sender creates room
   useEffect(() => {
-    if (roomCode && role === 'sender' && connectionStatus === 'p2p-connected') {
-      initiateConnection()
+    if (roomCode && role === 'sender' && connectionStatus === 'connected') {
+      console.log('Setting up WebRTC connection for sender...')
+      initializePeerConnection()
     }
   }, [roomCode, role, connectionStatus])
 
@@ -957,6 +1238,19 @@ function App() {
                 </div>
               </button>
             )}
+            
+            {/* Debug button for troubleshooting */}
+            <button
+              onClick={logConnectionDiagnostics}
+              className="w-full py-2 px-4 rounded-lg font-medium transition-all duration-300 bg-blue-600/20 text-blue-300 border border-blue-500/30 hover:bg-blue-600/30 backdrop-blur-sm text-sm"
+            >
+              <div className="flex items-center justify-center space-x-2">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span>Debug Connection</span>
+              </div>
+            </button>
           </div>
         </div>
         

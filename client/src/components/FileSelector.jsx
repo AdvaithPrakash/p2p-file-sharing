@@ -7,8 +7,45 @@ const FileSelector = ({ onFileSelect, selectedFile, disabled }) => {
   const handleFileChange = (event) => {
     const file = event.target.files[0]
     if (file) {
-      onFileSelect(file)
+      // Validate file before selecting
+      const validation = validateFile(file)
+      if (validation.valid) {
+        onFileSelect(file)
+      } else {
+        alert(`File validation failed: ${validation.error}`)
+        // Reset the input
+        event.target.value = ''
+      }
     }
+  }
+
+  const validateFile = (file) => {
+    const maxSize = 500 * 1024 * 1024 // 500MB limit
+    const allowedTypes = [
+      'image/', 'video/', 'audio/', 'text/', 'application/',
+      'application/pdf', 'application/zip', 'application/x-rar-compressed'
+    ]
+    
+    if (!file) {
+      return { valid: false, error: 'No file selected' }
+    }
+    
+    if (file.size > maxSize) {
+      return { valid: false, error: 'File too large (max 500MB)' }
+    }
+    
+    if (file.size === 0) {
+      return { valid: false, error: 'File is empty' }
+    }
+    
+    const isValidType = allowedTypes.some(type => file.type.startsWith(type)) || 
+                       file.name.includes('.') // Allow files with extensions
+    
+    if (!isValidType) {
+      return { valid: false, error: 'File type not supported' }
+    }
+    
+    return { valid: true }
   }
 
   const handleDragOver = (event) => {
@@ -31,7 +68,14 @@ const FileSelector = ({ onFileSelect, selectedFile, disabled }) => {
     
     const files = event.dataTransfer.files
     if (files.length > 0) {
-      onFileSelect(files[0])
+      const file = files[0]
+      // Validate file before selecting
+      const validation = validateFile(file)
+      if (validation.valid) {
+        onFileSelect(file)
+      } else {
+        alert(`File validation failed: ${validation.error}`)
+      }
     }
   }
 

@@ -10,3 +10,11 @@ services:
         value: production
       - key: PORT
         value: 10000
+    # Ensure HTTPS is enabled for WebRTC
+    headers:
+      - path: /*
+        name: Strict-Transport-Security
+        value: max-age=31536000; includeSubDomains
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
