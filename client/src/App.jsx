@@ -97,6 +97,7 @@ function App() {
   }, []) // Remove selectedPeer dependency to prevent infinite re-renders
 
   const handleWebRTCSignal = async (data) => {
+    console.log('WebRTC signal received:', data.type, 'from:', data.from)
     const { type, signal, from } = data
     
     // Validate data
@@ -107,26 +108,32 @@ function App() {
     
     // Only process signals if we're in a room
     if (!roomCode) {
+      console.log('No room code, ignoring signal')
       return
     }
     
     if (!peerConnectionRef.current) {
+      console.log('No peer connection, initializing...')
       await initializePeerConnection()
     }
 
     try {
       if (type === 'offer') {
+        console.log('Processing offer...')
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal))
         const answer = await peerConnectionRef.current.createAnswer()
         await peerConnectionRef.current.setLocalDescription(answer)
         
+        console.log('Sending answer...')
         socket.emit('webrtc-signal', {
           type: 'answer',
           signal: answer
         })
       } else if (type === 'answer') {
+        console.log('Processing answer...')
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal))
       } else if (type === 'ice-candidate') {
+        console.log('Processing ICE candidate...')
         await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(signal))
       }
     } catch (error) {
@@ -219,6 +226,7 @@ function App() {
     }
 
     peerConnectionRef.current.ondatachannel = (event) => {
+      console.log('Data channel received:', event.channel.label)
       const channel = event.channel
       dataChannelRef.current = channel
       setupDataChannel(channel)
@@ -251,9 +259,11 @@ function App() {
     }
 
     channel.onmessage = (event) => {
+      console.log('Data channel message received:', event.data instanceof ArrayBuffer ? 'ArrayBuffer' : 'JSON', event.data)
       try {
         // Check if it's binary data (ArrayBuffer) or JSON
         if (event.data instanceof ArrayBuffer) {
+          console.log('Received binary chunk, size:', event.data.byteLength)
           // Handle binary chunk data
           const uint8Array = new Uint8Array(event.data)
           
@@ -267,15 +277,20 @@ function App() {
           const progress = (receivedChunksRef.current.length / (fileChunksRef.current?.totalChunks || 1)) * 100
           setTransferProgress(progress)
           
+          console.log(`Received chunk ${receivedChunksRef.current.length}/${fileChunksRef.current?.totalChunks || 0}`)
+          
           // Check if we have all chunks
           if (fileChunksRef.current && receivedChunksRef.current.length === fileChunksRef.current.totalChunks) {
+            console.log('All chunks received, reconstructing file...')
             reconstructFile(fileChunksRef.current.fileName, fileChunksRef.current.fileType, fileChunksRef.current.totalChunks)
           }
         } else {
+          console.log('Received JSON data:', event.data)
           // Handle JSON data (file info)
           const data = JSON.parse(event.data)
           
           if (data.type === 'file-info') {
+            console.log('File info received:', data)
             // Store file info for reconstruction
             setSelectedFile({
               name: data.fileName,
@@ -732,6 +747,7 @@ function App() {
   // Set up WebRTC connection for receiver when they join
   useEffect(() => {
     if (roomCode && role === 'receiver' && connectionStatus === 'connected') {
+      console.log('Setting up WebRTC connection for receiver...')
       initializePeerConnection()
     }
   }, [roomCode, role, connectionStatus])
