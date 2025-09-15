@@ -256,6 +256,8 @@ function App() {
   }
 
   const setupDataChannel = (channel) => {
+    console.log('Setting up data channel, current state:', channel.readyState)
+    
     channel.onopen = () => {
       console.log('Data channel opened')
       setConnectionStatus('p2p-connected')
@@ -408,8 +410,10 @@ function App() {
       await initializePeerConnection()
       
       if (role === 'sender') {
+        console.log('Creating data channel as sender...')
         const dataChannel = peerConnectionRef.current.createDataChannel('fileTransfer')
         dataChannelRef.current = dataChannel
+        console.log('Data channel created, state:', dataChannel.readyState)
         setupDataChannel(dataChannel)
 
         const offer = await peerConnectionRef.current.createOffer()
@@ -430,6 +434,17 @@ function App() {
     if (!selectedFile || !dataChannelRef.current) {
       console.error('Cannot start transfer: missing file or data channel')
       setTransferState('error')
+      return
+    }
+
+    // Check if data channel is open
+    if (dataChannelRef.current.readyState !== 'open') {
+      console.log('Data channel not ready, waiting...', dataChannelRef.current.readyState)
+      // Wait for data channel to open
+      dataChannelRef.current.onopen = () => {
+        console.log('Data channel opened, starting transfer...')
+        startFileTransfer()
+      }
       return
     }
 
