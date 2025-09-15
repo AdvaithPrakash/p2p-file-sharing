@@ -7,7 +7,7 @@
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "cd server && npm run dev",
     "client": "cd client && npm run dev",
-    "build": "vite build && ls -la client/dist",
+    "build": "pwd && ls -la && echo 'Starting build...' && vite build && echo 'Build completed, checking output...' && ls -la client/ && ls -la client/dist && echo 'Build verification complete'",
     "start": "node server/index.js"
   },
   "keywords": ["p2p", "webrtc", "file-sharing", "mdns", "react"],
