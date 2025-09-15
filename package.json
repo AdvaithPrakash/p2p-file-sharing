@@ -7,7 +7,7 @@
     "dev": "concurrently \"npm run server\" \"npm run client\"",
     "server": "cd server && npm run dev",
     "client": "cd client && npm run dev",
-    "build": "cd client && npm run build && ls -la dist && cd ..",
+    "build": "vite build && ls -la client/dist",
     "start": "node server/index.js"
   },
   "keywords": ["p2p", "webrtc", "file-sharing", "mdns", "react"],
@@ -21,17 +21,17 @@
     "uuid": "^9.0.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "socket.io-client": "^4.7.2"
+    "socket.io-client": "^4.7.2",
+    "vite": "^4.4.5",
+    "@vitejs/plugin-react": "^4.0.3",
+    "tailwindcss": "^3.3.0",
+    "autoprefixer": "^10.4.14",
+    "postcss": "^8.4.24"
   },
   "devDependencies": {
     "concurrently": "^8.2.2",
     "nodemon": "^3.0.1",
     "@types/react": "^18.2.15",
-    "@types/react-dom": "^18.2.7",
-    "@vitejs/plugin-react": "^4.0.3",
-    "vite": "^4.4.5",
-    "tailwindcss": "^3.3.0",
-    "autoprefixer": "^10.4.14",
-    "postcss": "^8.4.24"
+    "@types/react-dom": "^18.2.7"
   }
 }
