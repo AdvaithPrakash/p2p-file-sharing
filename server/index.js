@@ -229,7 +229,24 @@ app.get('/health', (req, res) => {
 
 // Serve React app for all other routes (for production)
 app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../client/dist/index.html'));
+  const indexPath = path.join(__dirname, '../client/dist/index.html');
+  const fs = require('fs');
+  
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(500).send(`
+      <html>
+        <head><title>Build Error</title></head>
+        <body>
+          <h1>Build Error</h1>
+          <p>Client build files not found. Please check the build process.</p>
+          <p>Expected: ${indexPath}</p>
+          <p>Current directory: ${__dirname}</p>
+        </body>
+      </html>
+    `);
+  }
 });
 
 server.listen(PORT, () => {
