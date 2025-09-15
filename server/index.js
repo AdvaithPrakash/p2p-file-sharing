@@ -16,6 +16,7 @@ const io = socketIo(server, {
 });
 
 const PORT = process.env.PORT || 3001;
+const NODE_ENV = process.env.NODE_ENV || 'development';
 const peerId = uuidv4();
 const serviceName = `P2P-FileShare-${peerId.substring(0, 8)}`;
 
@@ -24,7 +25,9 @@ app.use(cors());
 app.use(express.json());
 
 // Serve static files from client build (for production)
-app.use(express.static(path.join(__dirname, '../client/dist')));
+if (NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '../client/dist')));
+}
 
 // Store discovered peers
 const discoveredPeers = new Map();
