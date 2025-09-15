@@ -1,0 +1,19 @@
+{
+  "name": "p2p-file-share",
+  "version": "1.0.0",
+  "description": "Full-stack P2P file sharing with WebRTC and mDNS discovery",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd server && npm run dev",
+    "client": "cd client && npm run dev",
+    "build": "cd client && npm run build",
+    "start": "cd server && npm start"
+  },
+  "keywords": ["p2p", "webrtc", "file-sharing", "mdns", "react"],
+  "author": "P2P File Share",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

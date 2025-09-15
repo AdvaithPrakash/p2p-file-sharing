@@ -1,0 +1,222 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Prevent flash of unstyled content - ensure dark theme is applied immediately */
+html, body {
+  background: linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%) !important;
+  color: white !important;
+  min-height: 100vh;
+}
+
+/* Ensure all text is visible by default and prevent theme switching */
+* {
+  color: inherit;
+}
+
+/* Force dark theme on all elements */
+#root {
+  background: linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%) !important;
+  color: white !important;
+  min-height: 100vh;
+}
+
+/* Lock the main background to prevent changes - targeted approach */
+html, body, #root {
+  background: linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%) !important;
+}
+
+/* Override Tailwind background classes specifically */
+.bg-gradient-to-br.from-slate-900.via-purple-900.to-slate-900 {
+  background: linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%) !important;
+}
+
+/* Force the gradient on the main container */
+.min-h-screen {
+  background: linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%) !important;
+}
+
+/* Prevent hover state background changes on main container */
+.min-h-screen:hover {
+  background: linear-gradient(135deg, #0f172a 0%, #581c87 50%, #0f172a 100%) !important;
+}
+
+/* Ensure focus states maintain visibility */
+*:focus {
+  outline: 2px solid rgba(59, 130, 246, 0.5);
+  outline-offset: 2px;
+}
+
+/* Ensure active states maintain visibility - only for buttons */
+button:active {
+  transform: scale(0.98);
+}
+
+/* Override only problematic light theme colors */
+.text-gray-600, .text-gray-700, .text-gray-800, .text-gray-900,
+.text-black, .text-slate-600, .text-slate-700, .text-slate-800, .text-slate-900 {
+  color: white !important;
+}
+
+/* Prevent background color changes from CSS-in-JS - targeted approach */
+[style*="background-color"] {
+  background-color: inherit !important;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Ensure logo is always visible and prominent - NUCLEAR OPTION */
+.logo-container {
+  display: flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  z-index: 999 !important;
+  position: relative !important;
+  width: 7rem !important;
+  height: 7rem !important;
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.4) 0%, rgba(147, 51, 234, 0.4) 100%) !important;
+  border: 2px solid rgba(255, 255, 255, 0.3) !important;
+  border-radius: 1.5rem !important;
+  backdrop-filter: blur(8px) !important;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25) !important;
+}
+
+/* Prevent logo from being hidden by any CSS - NUCLEAR OPTION */
+.logo-container svg {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  width: 3.5rem !important;
+  height: 3.5rem !important;
+  color: rgb(191, 219, 254) !important;
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite !important;
+}
+
+/* Ensure logo container is always visible - NUCLEAR OPTION */
+.w-28.h-28 {
+  display: flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  width: 7rem !important;
+  height: 7rem !important;
+}
+
+/* Override any potential hiding */
+.logo-container * {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+/* Force logo to always be visible regardless of any CSS */
+[class*="logo"] {
+  display: flex !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  z-index: 999 !important;
+}
+
+/* Nuclear protection for main title text */
+h1 {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  z-index: 999 !important;
+  position: relative !important;
+  font-size: 3rem !important;
+  font-weight: 700 !important;
+  background: linear-gradient(to right, rgb(96, 165, 250), rgb(168, 85, 247)) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  background-clip: text !important;
+  color: transparent !important;
+}
+
+/* Nuclear protection for subtitle text */
+p {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  z-index: 999 !important;
+  position: relative !important;
+  font-size: 1.125rem !important;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace !important;
+  color: rgb(209, 213, 219) !important;
+}
+
+/* Force all text elements to be visible */
+.text-5xl, .text-lg {
+  display: block !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+.animate-fade-in-up {
+  animation: fadeInUp 0.6s ease-out forwards;
+}
+
+/* Glassmorphism effect for containers */
+.glassmorphism {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+}
+
+/* Ensure glassmorphism containers maintain their effect */
+.rounded-2xl.backdrop-blur-sm.border {
+  background: rgba(255, 255, 255, 0.05) !important;
+  backdrop-filter: blur(10px) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+/* Ensure text remains visible in glassmorphism containers */
+.rounded-2xl.backdrop-blur-sm.border * {
+  color: white;
+}
+
+/* Ensure buttons maintain their styling */
+button {
+  color: white;
+}
+
+/* Ensure input elements maintain their styling */
+input, select, textarea {
+  color: white;
+  background-color: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+/* Ensure links maintain their styling */
+a {
+  color: white;
+}
+
+/* Ensure headings maintain their styling */
+h1, h2, h3, h4, h5, h6 {
+  color: white;
+}
+
+/* Ensure paragraphs maintain their styling */
+p {
+  color: white;
+}
+
+/* Ensure spans maintain their styling */
+span {
+  color: white;
+}
+
+/* Ensure divs maintain their styling */
+div {
+  color: white;
+}
