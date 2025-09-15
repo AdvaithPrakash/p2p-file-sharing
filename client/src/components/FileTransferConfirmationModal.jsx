@@ -58,7 +58,7 @@ const FileTransferConfirmationModal = ({
         
         <div id="modal-description" className="mb-8">
           <p className="text-lg mb-4 text-gray-300">
-            Device <span className="font-bold text-blue-300">{pendingTransfer.peerName}</span> wants to send you a file:
+            Someone wants to send you a file:
           </p>
           <div className="rounded-xl p-4 border bg-white/5 border-white/10">
             <div className="flex items-center space-x-4">

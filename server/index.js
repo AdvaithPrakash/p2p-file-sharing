@@ -2,7 +2,6 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
-const { Bonjour } = require('bonjour-service');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 
@@ -17,8 +16,6 @@ const io = socketIo(server, {
 
 const PORT = process.env.PORT || 3001;
 const NODE_ENV = process.env.NODE_ENV || 'development';
-const peerId = uuidv4();
-const serviceName = `P2P-FileShare-${peerId.substring(0, 8)}`;
 
 // Middleware
 app.use(cors());
@@ -29,83 +26,42 @@ if (NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../client/dist')));
 }
 
-// Store discovered peers
-const discoveredPeers = new Map();
+// Room management
+const rooms = new Map(); // Map roomCode to room data
 const connectedClients = new Set();
 const clientSockets = new Map(); // Map socket.id to socket for targeted messaging
 
-// mDNS Service Discovery
-const bonjourInstance = new Bonjour();
+// Generate a 6-digit room code
+const generateRoomCode = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+};
 
-// Publish our service
-const service = bonjourInstance.publish({
-  name: serviceName,
-  type: 'p2pshare',
-  port: PORT,
-  txt: {
-    peerId: peerId,
-    version: '1.0.0'
-  }
-});
+// Room data structure
+const createRoom = (socketId, isSender = true) => {
+  const roomCode = generateRoomCode();
+  const room = {
+    code: roomCode,
+    sender: isSender ? socketId : null,
+    receiver: isSender ? null : socketId,
+    createdAt: Date.now(),
+    lastActivity: Date.now()
+  };
+  rooms.set(roomCode, room);
+  return room;
+};
 
-console.log(`🚀 Server started with Peer ID: ${peerId}`);
-console.log(`📡 Broadcasting service: ${serviceName}`);
-
-// Listen for other peers on the network
-const browser = bonjourInstance.find({ type: 'p2pshare' }, (peer) => {
-  if (peer.name !== serviceName) {
-    console.log(`🔍 Discovered peer: ${peer.name} (${peer.host}:${peer.port})`);
-    discoveredPeers.set(peer.name, {
-      id: peer.txt?.peerId || peer.name,
-      name: peer.name,
-      host: peer.host,
-      port: peer.port,
-      lastSeen: Date.now()
-    });
-    
-    // Notify all connected clients about the new peer
-    io.emit('peer-discovered', {
-      id: peer.txt?.peerId || peer.name,
-      name: peer.name,
-      host: peer.host,
-      port: peer.port
-    });
-  }
-});
-
-// Also listen for service up events
-browser.on('up', (peer) => {
-  if (peer.name !== serviceName) {
-    console.log(`🔍 Service up: ${peer.name} (${peer.host}:${peer.port})`);
-    discoveredPeers.set(peer.name, {
-      id: peer.txt?.peerId || peer.name,
-      name: peer.name,
-      host: peer.host,
-      port: peer.port,
-      lastSeen: Date.now()
-    });
-    
-    // Notify all connected clients about the new peer
-    io.emit('peer-discovered', {
-      id: peer.txt?.peerId || peer.name,
-      name: peer.name,
-      host: peer.host,
-      port: peer.port
-    });
-  }
-});
-
-// Clean up old peers (remove if not seen for 30 seconds)
+// Clean up old rooms (remove if inactive for 10 minutes)
 setInterval(() => {
   const now = Date.now();
-  for (const [name, peer] of discoveredPeers.entries()) {
-    if (now - peer.lastSeen > 30000) {
-      console.log(`⏰ Removing stale peer: ${name}`);
-      discoveredPeers.delete(name);
-      io.emit('peer-lost', { name });
+  for (const [code, room] of rooms.entries()) {
+    if (now - room.lastActivity > 600000) { // 10 minutes
+      console.log(`⏰ Removing inactive room: ${code}`);
+      rooms.delete(code);
     }
   }
-}, 10000);
+}, 60000); // Check every minute
+
+console.log(`🚀 Server started on port ${PORT}`);
 
 // Socket.IO connection handling
 io.on('connection', (socket) => {
@@ -113,100 +69,151 @@ io.on('connection', (socket) => {
   connectedClients.add(socket.id);
   clientSockets.set(socket.id, socket);
   
-  // Send current peer list to newly connected client
-  socket.emit('peer-list', Array.from(discoveredPeers.values()));
+  // Handle room creation (sender)
+  socket.on('create-room', (callback) => {
+    try {
+      const room = createRoom(socket.id, true);
+      console.log(`🏠 Room created: ${room.code} by ${socket.id}`);
+      socket.join(room.code);
+      socket.roomCode = room.code;
+      socket.role = 'sender';
+      room.lastActivity = Date.now();
+      callback({ success: true, roomCode: room.code });
+    } catch (error) {
+      console.error('Error creating room:', error);
+      callback({ success: false, error: 'Failed to create room' });
+    }
+  });
   
-  // Handle WebRTC signaling
+  // Handle room joining (receiver)
+  socket.on('join-room', (data, callback) => {
+    try {
+      const { roomCode } = data;
+      if (!roomCode || !rooms.has(roomCode)) {
+        callback({ success: false, error: 'Room not found' });
+        return;
+      }
+      
+      const room = rooms.get(roomCode);
+      if (room.receiver) {
+        callback({ success: false, error: 'Room is full' });
+        return;
+      }
+      
+      room.receiver = socket.id;
+      room.lastActivity = Date.now();
+      socket.join(roomCode);
+      socket.roomCode = roomCode;
+      socket.role = 'receiver';
+      
+      console.log(`🚪 User ${socket.id} joined room ${roomCode}`);
+      
+      // Notify sender that receiver joined
+      const senderSocket = clientSockets.get(room.sender);
+      if (senderSocket) {
+        senderSocket.emit('receiver-joined', { roomCode });
+      }
+      
+      callback({ success: true, roomCode });
+    } catch (error) {
+      console.error('Error joining room:', error);
+      callback({ success: false, error: 'Failed to join room' });
+    }
+  });
+  
+  // Handle WebRTC signaling within rooms
   socket.on('webrtc-signal', (data) => {
     try {
-      // Validate data structure
-      if (!data || !data.type) {
-        console.error('Invalid WebRTC signal data:', data)
-        return
+      if (!data || !data.type || !socket.roomCode) {
+        console.error('Invalid WebRTC signal data:', data);
+        return;
       }
       
-      // If 'to' is specified, send to specific peer, otherwise broadcast
-      if (data.to) {
-        const targetSocket = clientSockets.get(data.to)
-        if (targetSocket) {
-          targetSocket.emit('webrtc-signal', {
-            ...data,
-            from: socket.id
-          });
-        } else {
-          console.error(`Target peer ${data.to} not found`)
-        }
-      } else {
-        // Fallback to broadcast for backward compatibility
-        socket.broadcast.emit('webrtc-signal', {
-          ...data,
-          from: socket.id
-        });
-      }
+      // Send to all other clients in the same room
+      socket.to(socket.roomCode).emit('webrtc-signal', {
+        ...data,
+        from: socket.id
+      });
     } catch (error) {
-      console.error('Error handling WebRTC signal:', error)
+      console.error('Error handling WebRTC signal:', error);
     }
   });
   
-  // Handle file transfer request
+  // Handle file transfer request within rooms
   socket.on('file-transfer-request', (data) => {
     try {
-      if (!data || !data.fileName || !data.fileSize) {
-        console.error('Invalid file transfer request:', data)
-        return
+      if (!data || !data.fileName || !data.fileSize || !socket.roomCode) {
+        console.error('Invalid file transfer request:', data);
+        return;
       }
       
-      console.log(`📁 File transfer request: ${data.fileName} (${data.fileSize} bytes)`);
+      console.log(`📁 File transfer request in room ${socket.roomCode}: ${data.fileName} (${data.fileSize} bytes)`);
       
-      // If 'to' is specified, send to specific peer, otherwise broadcast
-      if (data.to) {
-        const targetSocket = clientSockets.get(data.to)
-        if (targetSocket) {
-          targetSocket.emit('file-transfer-request', {
-            ...data,
-            from: socket.id
-          });
-        } else {
-          console.error(`Target peer ${data.to} not found for file transfer request`)
-        }
-      } else {
-        socket.broadcast.emit('file-transfer-request', {
-          ...data,
-          from: socket.id
-        });
+      // Send to all other clients in the same room
+      socket.to(socket.roomCode).emit('file-transfer-request', {
+        ...data,
+        from: socket.id
+      });
+      
+      // Update room activity
+      const room = rooms.get(socket.roomCode);
+      if (room) {
+        room.lastActivity = Date.now();
       }
     } catch (error) {
-      console.error('Error handling file transfer request:', error)
+      console.error('Error handling file transfer request:', error);
     }
   });
   
-  // Handle file transfer response
+  // Handle file transfer response within rooms
   socket.on('file-transfer-response', (data) => {
     try {
-      if (!data || typeof data.accepted !== 'boolean') {
-        console.error('Invalid file transfer response:', data)
-        return
+      if (!data || typeof data.accepted !== 'boolean' || !socket.roomCode) {
+        console.error('Invalid file transfer response:', data);
+        return;
       }
       
-      // If 'to' is specified, send to specific peer, otherwise broadcast
-      if (data.to) {
-        const targetSocket = clientSockets.get(data.to)
-        if (targetSocket) {
-          targetSocket.emit('file-transfer-response', {
-            ...data,
-            from: socket.id
-          });
-        } else {
-          console.error(`Target peer ${data.to} not found for file transfer response`)
-        }
-      } else {
-        socket.broadcast.emit('file-transfer-response', {
-          ...data,
-          from: socket.id
-        });
+      // Send to all other clients in the same room
+      socket.to(socket.roomCode).emit('file-transfer-response', {
+        ...data,
+        from: socket.id
+      });
+      
+      // Update room activity
+      const room = rooms.get(socket.roomCode);
+      if (room) {
+        room.lastActivity = Date.now();
       }
     } catch (error) {
-      console.error('Error handling file transfer response:', error)
+      console.error('Error handling file transfer response:', error);
+    }
+  });
+  
+  // Handle room leave
+  socket.on('leave-room', () => {
+    if (socket.roomCode) {
+      const room = rooms.get(socket.roomCode);
+      if (room) {
+        if (socket.role === 'sender') {
+          room.sender = null;
+          // Notify receiver that sender left
+          socket.to(socket.roomCode).emit('sender-left');
+        } else if (socket.role === 'receiver') {
+          room.receiver = null;
+          // Notify sender that receiver left
+          socket.to(socket.roomCode).emit('receiver-left');
+        }
+        
+        // If room is empty, remove it
+        if (!room.sender && !room.receiver) {
+          rooms.delete(socket.roomCode);
+          console.log(`🗑️ Room ${socket.roomCode} removed (empty)`);
+        }
+      }
+      
+      socket.leave(socket.roomCode);
+      socket.roomCode = null;
+      socket.role = null;
     }
   });
   
@@ -214,6 +221,28 @@ io.on('connection', (socket) => {
     console.log(`👋 Client disconnected: ${socket.id}`);
     connectedClients.delete(socket.id);
     clientSockets.delete(socket.id);
+    
+    // Handle room cleanup on disconnect
+    if (socket.roomCode) {
+      const room = rooms.get(socket.roomCode);
+      if (room) {
+        if (socket.role === 'sender') {
+          room.sender = null;
+          // Notify receiver that sender left
+          socket.to(socket.roomCode).emit('sender-left');
+        } else if (socket.role === 'receiver') {
+          room.receiver = null;
+          // Notify sender that receiver left
+          socket.to(socket.roomCode).emit('receiver-left');
+        }
+        
+        // If room is empty, remove it
+        if (!room.sender && !room.receiver) {
+          rooms.delete(socket.roomCode);
+          console.log(`🗑️ Room ${socket.roomCode} removed (empty)`);
+        }
+      }
+    }
   });
 });
 
@@ -221,9 +250,8 @@ io.on('connection', (socket) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
-    peerId: peerId,
     connectedClients: connectedClients.size,
-    discoveredPeers: discoveredPeers.size
+    activeRooms: rooms.size
   });
 });
 
@@ -251,15 +279,12 @@ app.get('*', (req, res) => {
 
 server.listen(PORT, () => {
   console.log(`🌐 Server running on http://localhost:${PORT}`);
-  console.log(`🔍 Looking for other peers on the network...`);
+  console.log(`🏠 Room-based file sharing ready`);
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n🛑 Shutting down server...');
-  service.stop();
-  browser.stop();
-  bonjourInstance.destroy();
   server.close(() => {
     console.log('✅ Server closed');
     process.exit(0);

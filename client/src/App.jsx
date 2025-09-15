@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { io } from 'socket.io-client'
-import PeerList from './components/PeerList'
+import RoomManager from './components/RoomManager'
 import FileSelector from './components/FileSelector'
 import TransferProgress from './components/TransferProgress'
 import ConnectionStatus from './components/ConnectionStatus'
@@ -12,18 +12,25 @@ const SERVER_URL = process.env.NODE_ENV === 'production'
 
 function App() {
   const [socket, setSocket] = useState(null)
-  const [peers, setPeers] = useState([])
+  const [roomCode, setRoomCode] = useState(null)
+  const [role, setRole] = useState(null) // 'sender' or 'receiver'
   const [selectedFile, setSelectedFile] = useState(null)
-  const [selectedPeer, setSelectedPeer] = useState(null)
   const [transferState, setTransferState] = useState('idle') // idle, sending, receiving, completed, error
   const [transferProgress, setTransferProgress] = useState(0)
   const [transferSpeed, setTransferSpeed] = useState(0)
   const [connectionStatus, setConnectionStatus] = useState('disconnected')
   const [isLoaded, setIsLoaded] = useState(false)
+  const [transferStats, setTransferStats] = useState({
+    startTime: null,
+    bytesTransferred: 0,
+    totalBytes: 0,
+    averageSpeed: 0,
+    peakSpeed: 0
+  })
   
   // File transfer confirmation modal state
   const [showTransferModal, setShowTransferModal] = useState(false)
-  const [pendingTransfer, setPendingTransfer] = useState(null) // { fileName, fileSize, from, peerName }
+  const [pendingTransfer, setPendingTransfer] = useState(null) // { fileName, fileSize, from }
   
   // Always use glassmorphism design - no toggle needed
   
@@ -53,19 +60,23 @@ function App() {
       setConnectionStatus('disconnected')
     })
 
-    newSocket.on('peer-list', (peerList) => {
-      console.log('Received peer list:', peerList)
-      setPeers(peerList)
+    newSocket.on('receiver-joined', (data) => {
+      console.log('Receiver joined room:', data.roomCode)
+      setConnectionStatus('p2p-connected')
     })
 
-    newSocket.on('peer-discovered', (peer) => {
-      console.log('New peer discovered:', peer)
-      setPeers(prev => [...prev.filter(p => p.id !== peer.id), peer])
+    newSocket.on('sender-left', () => {
+      console.log('Sender left the room')
+      setConnectionStatus('connected')
+      setTransferState('error')
+      alert('Sender left the room')
     })
 
-    newSocket.on('peer-lost', ({ name }) => {
-      console.log('Peer lost:', name)
-      setPeers(prev => prev.filter(p => p.name !== name))
+    newSocket.on('receiver-left', () => {
+      console.log('Receiver left the room')
+      setConnectionStatus('connected')
+      setTransferState('error')
+      alert('Receiver left the room')
     })
 
     newSocket.on('webrtc-signal', handleWebRTCSignal)
@@ -94,8 +105,8 @@ function App() {
       return
     }
     
-    // Only process signals from the selected peer
-    if (selectedPeer && from !== selectedPeer.id) {
+    // Only process signals if we're in a room
+    if (!roomCode) {
       return
     }
     
@@ -111,8 +122,7 @@ function App() {
         
         socket.emit('webrtc-signal', {
           type: 'answer',
-          signal: answer,
-          to: from
+          signal: answer
         })
       } else if (type === 'answer') {
         await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(signal))
@@ -131,22 +141,16 @@ function App() {
     // Check if we're already in a transfer
     if (transferState !== 'idle') {
       socket.emit('file-transfer-response', {
-        accepted: false,
-        to: from
+        accepted: false
       })
       return
     }
-    
-    // Find the peer name for display
-    const peer = peers.find(p => p.id === from)
-    const peerName = peer ? peer.name : `Peer ${from.substring(0, 8)}`
     
     // Store the pending transfer and show confirmation modal
     setPendingTransfer({
       fileName,
       fileSize,
-      from,
-      peerName
+      from
     })
     setShowTransferModal(true)
   }
@@ -166,8 +170,7 @@ function App() {
   const handleAcceptTransfer = () => {
     if (pendingTransfer) {
       socket.emit('file-transfer-response', {
-        accepted: true,
-        to: pendingTransfer.from
+        accepted: true
       })
       setTransferState('receiving')
       setSelectedFile({ name: pendingTransfer.fileName, size: pendingTransfer.fileSize })
@@ -181,8 +184,7 @@ function App() {
   const handleRejectTransfer = () => {
     if (pendingTransfer) {
       socket.emit('file-transfer-response', {
-        accepted: false,
-        to: pendingTransfer.from
+        accepted: false
       })
     }
     
@@ -195,18 +197,23 @@ function App() {
     const configuration = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ]
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' }
+      ],
+      iceCandidatePoolSize: 10, // Pre-gather more ICE candidates
+      bundlePolicy: 'max-bundle', // Reduce number of ICE candidates
+      rtcpMuxPolicy: 'require', // Reduce number of ICE candidates
+      iceTransportPolicy: 'all' // Allow both STUN and TURN
     }
 
     peerConnectionRef.current = new RTCPeerConnection(configuration)
 
     peerConnectionRef.current.onicecandidate = (event) => {
-      if (event.candidate && selectedPeer?.id) {
+      if (event.candidate && roomCode) {
         socket.emit('webrtc-signal', {
           type: 'ice-candidate',
-          signal: event.candidate,
-          to: selectedPeer.id
+          signal: event.candidate
         })
       }
     }
@@ -245,42 +252,43 @@ function App() {
 
     channel.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data)
-        
-        if (data.type === 'file-chunk') {
-          // Validate chunk data
-          if (typeof data.chunkIndex !== 'number' || typeof data.totalChunks !== 'number' || !data.chunk) {
-            console.error('Invalid chunk data:', data)
-            return
-          }
+        // Check if it's binary data (ArrayBuffer) or JSON
+        if (event.data instanceof ArrayBuffer) {
+          // Handle binary chunk data
+          const uint8Array = new Uint8Array(event.data)
           
-          // Store chunk with its index for proper ordering
+          // Store chunk data
           receivedChunksRef.current.push({
-            chunk: data.chunk,
-            chunkIndex: data.chunkIndex,
-            totalChunks: data.totalChunks
+            data: uint8Array,
+            chunkIndex: receivedChunksRef.current.length,
+            totalChunks: fileChunksRef.current?.totalChunks || 0
           })
           
-          const progress = (receivedChunksRef.current.length / data.totalChunks) * 100
+          const progress = (receivedChunksRef.current.length / (fileChunksRef.current?.totalChunks || 1)) * 100
           setTransferProgress(progress)
           
           // Check if we have all chunks
-          if (receivedChunksRef.current.length === data.totalChunks) {
-            reconstructFile(data.fileName, data.fileType, data.totalChunks)
+          if (fileChunksRef.current && receivedChunksRef.current.length === fileChunksRef.current.totalChunks) {
+            reconstructFile(fileChunksRef.current.fileName, fileChunksRef.current.fileType, fileChunksRef.current.totalChunks)
           }
-        } else if (data.type === 'file-info') {
-          // Store file info for reconstruction
-          setSelectedFile({
-            name: data.fileName,
-            size: data.fileSize,
-            type: data.fileType
-          })
-          // Clear previous chunks and store total chunks count
-          receivedChunksRef.current = []
-          fileChunksRef.current = {
-            totalChunks: data.totalChunks,
-            fileName: data.fileName,
-            fileType: data.fileType
+        } else {
+          // Handle JSON data (file info)
+          const data = JSON.parse(event.data)
+          
+          if (data.type === 'file-info') {
+            // Store file info for reconstruction
+            setSelectedFile({
+              name: data.fileName,
+              size: data.fileSize,
+              type: data.fileType
+            })
+            // Clear previous chunks and store total chunks count
+            receivedChunksRef.current = []
+            fileChunksRef.current = {
+              totalChunks: data.totalChunks,
+              fileName: data.fileName,
+              fileType: data.fileType
+            }
           }
         }
       } catch (error) {
@@ -303,13 +311,66 @@ function App() {
     }
   }
 
-  const initiateConnection = async (peer) => {
+  // Room management functions
+  const handleCreateRoom = async () => {
+    if (!socket) return
+    
+    try {
+      socket.emit('create-room', (response) => {
+        if (response.success) {
+          setRoomCode(response.roomCode)
+          setRole('sender')
+          console.log('Room created:', response.roomCode)
+        } else {
+          alert('Failed to create room: ' + response.error)
+        }
+      })
+    } catch (error) {
+      console.error('Error creating room:', error)
+      alert('Failed to create room')
+    }
+  }
+
+  const handleJoinRoom = async (code) => {
+    if (!socket) return
+    
+    try {
+      socket.emit('join-room', { roomCode: code }, (response) => {
+        if (response.success) {
+          setRoomCode(response.roomCode)
+          setRole('receiver')
+          console.log('Joined room:', response.roomCode)
+        } else {
+          alert('Failed to join room: ' + response.error)
+        }
+      })
+    } catch (error) {
+      console.error('Error joining room:', error)
+      alert('Failed to join room')
+    }
+  }
+
+  const handleLeaveRoom = () => {
+    if (socket && roomCode) {
+      socket.emit('leave-room')
+    }
+    setRoomCode(null)
+    setRole(null)
+    setSelectedFile(null)
+    setTransferState('idle')
+    setTransferProgress(0)
+    resetTransfer()
+  }
+
+  const handleRoleChange = (newRole) => {
+    setRole(newRole)
+  }
+
+  const initiateConnection = async () => {
     try {
       // Reset transfer state
       setTransferState('idle')
       setTransferProgress(0)
-      
-      setSelectedPeer(peer)
       
       // Clean up existing connection
       if (peerConnectionRef.current) {
@@ -325,18 +386,19 @@ function App() {
       
       await initializePeerConnection()
       
-      const dataChannel = peerConnectionRef.current.createDataChannel('fileTransfer')
-      dataChannelRef.current = dataChannel
-      setupDataChannel(dataChannel)
+      if (role === 'sender') {
+        const dataChannel = peerConnectionRef.current.createDataChannel('fileTransfer')
+        dataChannelRef.current = dataChannel
+        setupDataChannel(dataChannel)
 
-      const offer = await peerConnectionRef.current.createOffer()
-      await peerConnectionRef.current.setLocalDescription(offer)
-      
-      socket.emit('webrtc-signal', {
-        type: 'offer',
-        signal: offer,
-        to: peer.id
-      })
+        const offer = await peerConnectionRef.current.createOffer()
+        await peerConnectionRef.current.setLocalDescription(offer)
+        
+        socket.emit('webrtc-signal', {
+          type: 'offer',
+          signal: offer
+        })
+      }
     } catch (error) {
       console.error('Error initiating connection:', error)
       setTransferState('error')
@@ -352,8 +414,30 @@ function App() {
 
     try {
       const file = selectedFile
-      const chunkSize = 16 * 1024 // 16KB chunks
+      
+      // Adaptive chunk sizing based on file size
+      let chunkSize, maxConcurrentChunks
+      if (file.size < 10 * 1024 * 1024) { // < 10MB
+        chunkSize = 32 * 1024 // 32KB chunks
+        maxConcurrentChunks = 2
+      } else if (file.size < 100 * 1024 * 1024) { // < 100MB
+        chunkSize = 64 * 1024 // 64KB chunks
+        maxConcurrentChunks = 4
+      } else { // >= 100MB
+        chunkSize = 128 * 1024 // 128KB chunks
+        maxConcurrentChunks = 6
+      }
+      
       const totalChunks = Math.ceil(file.size / chunkSize)
+      
+      // Compress file if it's text-based and larger than 1MB
+      const shouldCompress = file.size > 1024 * 1024 && (
+        file.type.startsWith('text/') || 
+        file.name.endsWith('.json') || 
+        file.name.endsWith('.xml') || 
+        file.name.endsWith('.csv') ||
+        file.name.endsWith('.txt')
+      )
       
       // Send file info first
       dataChannelRef.current.send(JSON.stringify({
@@ -361,60 +445,121 @@ function App() {
         fileName: file.name,
         fileSize: file.size,
         fileType: file.type,
-        totalChunks: totalChunks
+        totalChunks: totalChunks,
+        compressed: shouldCompress
       }))
 
-      // Send file chunks
-      let chunkIndex = 0
-      const reader = new FileReader()
+      // Parallel chunk processing
+      let completedChunks = 0
+      let sentChunks = 0
+      const transferStartTime = Date.now()
+      const chunkQueue = []
       
-      reader.onerror = () => {
-        console.error('Error reading file chunk')
-        setTransferState('error')
+      // Initialize chunk queue
+      for (let i = 0; i < totalChunks; i++) {
+        chunkQueue.push({
+          index: i,
+          start: i * chunkSize,
+          end: Math.min((i + 1) * chunkSize, file.size),
+          status: 'pending' // pending, processing, sent
+        })
       }
       
-      const readNextChunk = () => {
-        if (chunkIndex >= totalChunks) {
-          setTransferState('completed')
-          return
-        }
+      const processChunk = async (chunkInfo) => {
+        if (chunkInfo.status !== 'pending') return
         
-        const start = chunkIndex * chunkSize
-        const end = Math.min(start + chunkSize, file.size)
-        const chunk = file.slice(start, end)
+        chunkInfo.status = 'processing'
         
-        reader.onload = (e) => {
-          try {
-            const arrayBuffer = e.target.result
-            const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))
-            
-            dataChannelRef.current.send(JSON.stringify({
-              type: 'file-chunk',
-              chunk: base64,
-              chunkIndex: chunkIndex,
-              totalChunks: totalChunks
-            }))
-            
-            chunkIndex++
-            const progress = (chunkIndex / totalChunks) * 100
-            setTransferProgress(progress)
-            
-            // Continue with next chunk
-            if (chunkIndex < totalChunks) {
-              readNextChunk()
-            } else {
-              setTransferState('completed')
+        try {
+          const chunk = file.slice(chunkInfo.start, chunkInfo.end)
+          const arrayBuffer = await new Promise((resolve, reject) => {
+            const reader = new FileReader()
+            reader.onload = (e) => resolve(e.target.result)
+            reader.onerror = reject
+            reader.readAsArrayBuffer(chunk)
+          })
+          
+          // Compress chunk if needed
+          let dataToSend = arrayBuffer
+          if (shouldCompress) {
+            try {
+              const compressed = await compressData(arrayBuffer)
+              if (compressed.length < arrayBuffer.byteLength) {
+                dataToSend = compressed
+              }
+            } catch (error) {
+              console.warn('Compression failed, sending uncompressed:', error)
             }
-          } catch (error) {
-            console.error('Error processing chunk:', error)
-            setTransferState('error')
           }
+          
+          // Send chunk
+          dataChannelRef.current.send(dataToSend)
+          
+          chunkInfo.status = 'sent'
+          sentChunks++
+          completedChunks++
+          
+          // Update progress
+          const progress = (completedChunks / totalChunks) * 100
+          setTransferProgress(progress)
+          
+          // Calculate and update transfer speed
+          const elapsed = (Date.now() - transferStartTime) / 1000
+          const transferred = (completedChunks * chunkSize) / (1024 * 1024) // MB
+          const speed = transferred / elapsed
+          setTransferSpeed(speed)
+          
+          // Update transfer stats
+          setTransferStats(prev => {
+            const newBytesTransferred = completedChunks * chunkSize
+            const newAverageSpeed = newBytesTransferred / (elapsed * 1024 * 1024) // MB/s
+            const newPeakSpeed = Math.max(prev.peakSpeed, speed)
+            
+            return {
+              startTime: prev.startTime || transferStartTime,
+              bytesTransferred: newBytesTransferred,
+              totalBytes: file.size,
+              averageSpeed: newAverageSpeed,
+              peakSpeed: newPeakSpeed
+            }
+          })
+          
+          // Check if transfer is complete
+          if (completedChunks === totalChunks) {
+            const transferTime = (Date.now() - transferStartTime) / 1000
+            const speedMBps = (file.size / (1024 * 1024)) / transferTime
+            console.log(`Transfer completed in ${transferTime.toFixed(2)}s at ${speedMBps.toFixed(2)} MB/s`)
+            setTransferState('completed')
+          }
+          
+        } catch (error) {
+          console.error('Error processing chunk:', error)
+          setTransferState('error')
         }
-        
-        reader.readAsArrayBuffer(chunk)
       }
       
-      readNextChunk()
+      // Process chunks with concurrency limit
+      const processNextChunks = () => {
+        const pendingChunks = chunkQueue.filter(chunk => chunk.status === 'pending')
+        const processingChunks = chunkQueue.filter(chunk => chunk.status === 'processing')
+        const availableSlots = maxConcurrentChunks - processingChunks.length
+        
+        for (let i = 0; i < Math.min(availableSlots, pendingChunks.length); i++) {
+          processChunk(pendingChunks[i])
+        }
+      }
+      
+      // Start processing
+      processNextChunks()
+      
+      // Continue processing as chunks complete
+      const interval = setInterval(() => {
+        processNextChunks()
+        if (completedChunks === totalChunks) {
+          clearInterval(interval)
+        }
+      }, 10) // Check every 10ms
+      
     } catch (error) {
       console.error('Error starting file transfer:', error)
       setTransferState('error')
@@ -433,12 +578,19 @@ function App() {
       const sortedChunks = receivedChunksRef.current
         .sort((a, b) => a.chunkIndex - b.chunkIndex)
         .map(chunkData => {
-          try {
-            return Uint8Array.from(atob(chunkData.chunk), c => c.charCodeAt(0))
-          } catch (error) {
-            console.error('Error decoding chunk:', error)
-            return new Uint8Array(0)
+          // Handle both old base64 format and new ArrayBuffer format
+          if (chunkData.data) {
+            return chunkData.data // New format: direct Uint8Array
+          } else if (chunkData.chunk) {
+            // Old format: base64 string
+            try {
+              return Uint8Array.from(atob(chunkData.chunk), c => c.charCodeAt(0))
+            } catch (error) {
+              console.error('Error decoding chunk:', error)
+              return new Uint8Array(0)
+            }
           }
+          return new Uint8Array(0)
         })
       
       // Verify we have all chunks
@@ -478,6 +630,72 @@ function App() {
     }
   }
 
+  // Compression function using Web Compression API
+  const compressData = async (data) => {
+    const stream = new CompressionStream('gzip')
+    const writer = stream.writable.getWriter()
+    const reader = stream.readable.getReader()
+    
+    // Write data to compression stream
+    writer.write(data)
+    writer.close()
+    
+    // Read compressed data
+    const chunks = []
+    let done = false
+    while (!done) {
+      const { value, done: readerDone } = await reader.read()
+      done = readerDone
+      if (value) {
+        chunks.push(value)
+      }
+    }
+    
+    // Combine chunks
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0)
+    const result = new Uint8Array(totalLength)
+    let offset = 0
+    for (const chunk of chunks) {
+      result.set(chunk, offset)
+      offset += chunk.length
+    }
+    
+    return result.buffer
+  }
+
+  // Decompression function
+  const decompressData = async (compressedData) => {
+    const stream = new DecompressionStream('gzip')
+    const writer = stream.writable.getWriter()
+    const reader = stream.readable.getReader()
+    
+    // Write compressed data to decompression stream
+    writer.write(compressedData)
+    writer.close()
+    
+    // Read decompressed data
+    const chunks = []
+    let done = false
+    while (!done) {
+      const { value, done: readerDone } = await reader.read()
+      done = readerDone
+      if (value) {
+        chunks.push(value)
+      }
+    }
+    
+    // Combine chunks
+    const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0)
+    const result = new Uint8Array(totalLength)
+    let offset = 0
+    for (const chunk of chunks) {
+      result.set(chunk, offset)
+      offset += chunk.length
+    }
+    
+    return result.buffer
+  }
+
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 Bytes'
     const k = 1024
@@ -491,7 +709,6 @@ function App() {
     setTransferProgress(0)
     setConnectionStatus('connected')
     setSelectedFile(null)
-    setSelectedPeer(null)
     receivedChunksRef.current = []
     fileChunksRef.current = []
     
@@ -504,6 +721,20 @@ function App() {
     dataChannelRef.current = null
     peerConnectionRef.current = null
   }
+
+  // Initiate connection when receiver joins
+  useEffect(() => {
+    if (roomCode && role === 'sender' && connectionStatus === 'p2p-connected') {
+      initiateConnection()
+    }
+  }, [roomCode, role, connectionStatus])
+
+  // Set up WebRTC connection for receiver when they join
+  useEffect(() => {
+    if (roomCode && role === 'receiver' && connectionStatus === 'connected') {
+      initializePeerConnection()
+    }
+  }, [roomCode, role, connectionStatus])
 
   // Show loading screen while CSS loads
   if (!isLoaded) {
@@ -615,45 +846,52 @@ function App() {
         <ConnectionStatus status={connectionStatus} />
         
         <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
-          {/* Left Column - Peers and File Selection */}
+          {/* Left Column - Room Management and File Selection */}
           <div className="flex flex-col space-y-6">
             <div className="flex-1">
-              <PeerList 
-                peers={peers} 
-                onPeerSelect={initiateConnection}
-                selectedPeer={selectedPeer}
+              <RoomManager 
+                roomCode={roomCode}
+                onRoomCreated={handleCreateRoom}
+                onRoomJoined={handleJoinRoom}
+                onRoomLeft={handleLeaveRoom}
+                isConnected={connectionStatus === 'connected' || connectionStatus === 'p2p-connected'}
+                role={role}
+                onRoleChange={handleRoleChange}
               />
             </div>
             
-            <FileSelector 
-              onFileSelect={setSelectedFile}
-              selectedFile={selectedFile}
-              disabled={!selectedPeer || transferState !== 'idle'}
-            />
-            
-            {selectedFile && selectedPeer && transferState === 'idle' && (
-              <button
-                onClick={() => {
-                  if (socket && selectedPeer.id) {
-                    socket.emit('file-transfer-request', {
-                      fileName: selectedFile.name,
-                      fileSize: selectedFile.size,
-                      to: selectedPeer.id
-                    })
-                  } else {
-                    console.error('Cannot send file: missing socket or peer ID')
-                    setTransferState('error')
-                  }
-                }}
-                className="w-full py-4 px-6 rounded-2xl font-semibold text-lg transition-all duration-300 transform hover:scale-105 hover:shadow-xl bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:from-blue-600 hover:to-purple-700 shadow-blue-500/25"
-              >
-                <div className="flex items-center justify-center space-x-2">
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                  </svg>
-                  <span>Send File to {selectedPeer.name}</span>
-                </div>
-              </button>
+            {roomCode && role === 'sender' && (
+              <>
+                <FileSelector 
+                  onFileSelect={setSelectedFile}
+                  selectedFile={selectedFile}
+                  disabled={transferState !== 'idle'}
+                />
+                
+                {selectedFile && transferState === 'idle' && (
+                  <button
+                    onClick={() => {
+                      if (socket) {
+                        socket.emit('file-transfer-request', {
+                          fileName: selectedFile.name,
+                          fileSize: selectedFile.size
+                        })
+                      } else {
+                        console.error('Cannot send file: missing socket')
+                        setTransferState('error')
+                      }
+                    }}
+                    className="w-full py-4 px-6 rounded-2xl font-semibold text-lg transition-all duration-300 transform hover:scale-105 hover:shadow-xl bg-gradient-to-r from-blue-500 to-purple-600 text-white hover:from-blue-600 hover:to-purple-700 shadow-blue-500/25"
+                  >
+                    <div className="flex items-center justify-center space-x-2">
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
+                      </svg>
+                      <span>Send File</span>
+                    </div>
+                  </button>
+                )}
+              </>
             )}
           </div>
           
