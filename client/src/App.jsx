@@ -39,6 +39,7 @@ function App() {
   const fileChunksRef = useRef([])
   const receivedChunksRef = useRef([])
   const transferStartTimeRef = useRef(null)
+  const roomCodeRef = useRef(null)
 
   useEffect(() => {
     // Set loaded state after a short delay to ensure CSS is loaded
@@ -97,7 +98,7 @@ function App() {
   }, []) // Remove selectedPeer dependency to prevent infinite re-renders
 
   const handleWebRTCSignal = async (data) => {
-    console.log('WebRTC signal received:', data.type, 'from:', data.from)
+    console.log('WebRTC signal received:', data.type, 'from:', data.from, 'roomCode:', roomCodeRef.current)
     const { type, signal, from } = data
     
     // Validate data
@@ -107,10 +108,12 @@ function App() {
     }
     
     // Only process signals if we're in a room
-    if (!roomCode) {
-      console.log('No room code, ignoring signal')
+    if (!roomCodeRef.current) {
+      console.log('No room code, ignoring signal. Current roomCode:', roomCodeRef.current)
       return
     }
+    
+    console.log('Processing WebRTC signal in room:', roomCodeRef.current)
     
     if (!peerConnectionRef.current) {
       console.log('No peer connection, initializing...')
@@ -217,7 +220,7 @@ function App() {
     peerConnectionRef.current = new RTCPeerConnection(configuration)
 
     peerConnectionRef.current.onicecandidate = (event) => {
-      if (event.candidate && roomCode) {
+      if (event.candidate && roomCodeRef.current) {
         socket.emit('webrtc-signal', {
           type: 'ice-candidate',
           signal: event.candidate
@@ -333,6 +336,7 @@ function App() {
     try {
       socket.emit('create-room', (response) => {
         if (response.success) {
+          roomCodeRef.current = response.roomCode
           setRoomCode(response.roomCode)
           setRole('sender')
           console.log('Room created:', response.roomCode)
@@ -352,6 +356,7 @@ function App() {
     try {
       socket.emit('join-room', { roomCode: code }, (response) => {
         if (response.success) {
+          roomCodeRef.current = response.roomCode
           setRoomCode(response.roomCode)
           setRole('receiver')
           console.log('Joined room:', response.roomCode)
@@ -369,6 +374,7 @@ function App() {
     if (socket && roomCode) {
       socket.emit('leave-room')
     }
+    roomCodeRef.current = null
     setRoomCode(null)
     setRole(null)
     setSelectedFile(null)
